@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Poser</title>
+<style>
+  :root {
+    --bg: #17181c; --panel: #1f2127; --line: #2c2f37; --text: #d6d8de;
+    --dim: #8b8f9a; --accent: #5aa0ff; --ok: #58c78a; --err: #e46a6a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 12px/1.45 -apple-system, "SF Pro Text", Helvetica, sans-serif;
+    user-select: none; -webkit-user-select: none;
+  }
+  .wrap { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  header { display: flex; align-items: baseline; gap: 8px; }
+  header b { font-size: 15px; letter-spacing: .02em; }
+  header span { color: var(--dim); font-size: 11px; }
+  .tabs { display: flex; gap: 4px; }
+  .tabs button { flex: 1; background: var(--panel); color: var(--dim); border: 1px solid var(--line); }
+  .tabs button.on { color: var(--text); border-color: var(--accent); }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .card h3 { margin: 0; font-size: 11px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+  .row { display: flex; align-items: center; gap: 6px; }
+  .row label { flex: 0 0 96px; color: var(--dim); }
+  .row > :not(label) { flex: 1; min-width: 0; }
+  select, input[type=text], input[type=number] {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: inherit;
+  }
+  input[type=range] { accent-color: var(--accent); }
+  button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 8px; font: inherit; cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  .hint { color: var(--dim); font-size: 11px; }
+  .check { display: flex; align-items: center; gap: 6px; color: var(--dim); }
+  .bias { display: grid; grid-template-columns: 18px 1fr 36px; gap: 4px 6px; align-items: center; }
+  .bias span:last-child { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .items { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow: auto; }
+  .items .row label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .items input { width: 56px; flex: 0 0 56px; }
+  #status { min-height: 32px; padding: 6px 8px; border-radius: 6px; background: var(--panel); color: var(--dim); white-space: pre-wrap; }
+  #status.ok { color: var(--ok); } #status.err { color: var(--err); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><b>Poser</b><span id="appver"></span><span style="margin-left:auto">pose rigs for Rive</span></header>
+
+  <div class="card">
+    <div class="row"><label>Artboard</label><select id="artboard"></select></div>
+    <div class="row"><label>Pose timeline</label><select id="timeline"></select></div>
+    <div class="row"><button id="refresh">Refresh lists</button></div>
+  </div>
+
+  <div class="tabs">
+    <button data-tab="joystick" class="on">Joystick</button>
+    <button data-tab="sliders">Sliders</button>
+    <button data-tab="switch">Switch</button>
+    <button data-tab="tools">Tools</button>
+  </div>
+
+  <!-- Joystick -->
+  <section data-pane="joystick">
+    <div class="card">
+      <h3>Bind</h3>
+      <p class="hint">Key the origin on frame 0 and the four extremes on frames 1–4, keying every property on every pose. Add a joystick (J) to the artboard, then bind. The panel bakes each pose into a formula, so the rig runs with no script.</p>
+      <div class="row"><label>Frame order</label><select id="order"></select></div>
+      <div class="row"><label>Joystick</label><select id="joystick"></select></div>
+      <div class="row"><label>Rig name</label><input type="text" id="rig" value="look" /></div>
+      <label class="check"><input type="checkbox" id="selectedOnly" /> Only the selection (and everything under it)</label>
+      <label class="check"><input type="checkbox" id="removeKeys" checked /> Remove the pose keys (Unbind restores them)</label>
+      <button class="primary" id="bindJoy">Bind to joystick</button>
+    </div>
+    <div class="card">
+      <h3>Ease bias</h3>
+      <p class="hint">−100 eases in, +100 eases out, 0 is linear (per direction, like J&amp;S EaseBias).</p>
+      <div class="row"><label>Rig</label><select id="easeRig"></select></div>
+      <div class="bias">
+        <span>L</span><input type="range" min="-100" max="100" value="0" data-dir="L" /><span>0</span>
+        <span>R</span><input type="range" min="-100" max="100" value="0" data-dir="R" /><span>0</span>
+        <span>U</span><input type="range" min="-100" max="100" value="0" data-dir="U" /><span>0</span>
+        <span>D</span><input type="range" min="-100" max="100" value="0" data-dir="D" /><span>0</span>
+      </div>
+      <button id="applyEase">Apply ease bias</button>
+    </div>
+  </section>
+
+  <!-- Sliders -->
+  <section data-pane="sliders" hidden>
+    <div class="card">
+      <h3>Bind</h3>
+      <p class="hint">The origin goes on frame 0 and one pose on each following frame. Each pose becomes a slider (0–100) in the artboard's view model, and sliders add together like blend shapes.</p>
+      <div class="row"><label>Poses</label><input type="number" id="poses" min="1" max="64" value="4" /></div>
+      <div class="row"><label>Rig name</label><input type="text" id="sliderRig" value="sliders" /></div>
+      <label class="check"><input type="checkbox" id="negative" /> Negative values give the inverse pose</label>
+      <label class="check"><input type="checkbox" id="sliderSelectedOnly" /> Only the selection</label>
+      <label class="check"><input type="checkbox" id="sliderRemoveKeys" checked /> Remove the pose keys</label>
+      <button class="primary" id="bindSliders">Bind to sliders</button>
+    </div>
+    <div class="card">
+      <h3>UI slider</h3>
+      <p class="hint">Drive a slider from a joystick axis, so it can be dragged and keyed on the canvas.</p>
+      <div class="row"><label>Slider rig</label><select id="uiSliderRig"></select></div>
+      <div class="row"><label>Slider</label><input type="number" id="uiSlider" min="1" value="1" /></div>
+      <div class="row"><label>Joystick</label><select id="uiJoystick"></select></div>
+      <div class="row"><label>Axis</label><select id="uiAxis"><option value="x">x</option><option value="y">y</option></select></div>
+      <button id="bindUiSlider">Connect</button>
+    </div>
+  </section>
+
+  <!-- Switch -->
+  <section data-pane="switch" hidden>
+    <div class="card">
+      <h3>Switch</h3>
+      <p class="hint">Select the swap items (mouths, noses…). Each one gets a spot on the joystick (−1 to 1, y down), and only the item nearest the joystick stays visible.</p>
+      <div class="row"><label>Joystick rig</label><select id="switchRig"></select></div>
+      <button id="loadItems">Use selected items</button>
+      <div class="items" id="items"></div>
+      <button class="primary" id="bindSwitch">Bind switch</button>
+    </div>
+  </section>
+
+  <!-- Tools -->
+  <section data-pane="tools" hidden>
+    <div class="card">
+      <h3>Pose tools</h3>
+      <div class="row"><label>Frame</label><input type="number" id="toolFrame" min="0" value="1" /></div>
+      <div class="row"><button id="keyAll">Key all</button><button id="pasteOrigin">Paste origin</button></div>
+      <label class="check"><input type="checkbox" id="overwrite" /> Paste over existing keys</label>
+      <div class="row"><label>Pose frames</label><input type="number" id="flatPoses" min="1" value="4" /></div>
+      <button id="unkeyFlat">Unkey flat</button>
+      <p class="hint">Key all keys every animatable number on the selection. Paste origin copies frame 0 to the frame above. Unkey flat removes tracks that never change across the pose frames.</p>
+    </div>
+    <div class="card">
+      <h3>PathFlipper</h3>
+      <div class="row"><button id="flipH">Flip horizontal</button><button id="flipV">Flip vertical</button></div>
+      <p class="hint">Mirrors the selected path around its first vertex.</p>
+    </div>
+    <div class="card">
+      <h3>Rigs in this file</h3>
+      <div class="row"><select id="rigs"></select><button id="unbind" style="flex:0 0 auto">Unbind</button></div>
+      <p class="hint">Unbind removes what the panel created and puts the pose keys back.</p>
+    </div>
+  </section>
+
+  <div id="status">Connecting…</div>
+</div>
+
+<script type="module">
+import { createRig } from "./rig.js";
+import { ORDERS, DIRECTIONS } from "./engine.js";
+
+let rpcId = 1;
+async function mcp(tool, args) {
+  const payload = JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: tool, arguments: args } });
+  const raw = await window.__TAURI__.core.invoke("mcp_call", { payload });
+  const rpc = JSON.parse(raw.split("\n").filter(l => l.startsWith("data:")).map(l => l.slice(5).trim()).pop() ?? raw);
+  if (rpc.error) throw new Error(rpc.error.message || "MCP error");
+  const inner = rpc.result?.structuredContent?.content ?? rpc.result?.content?.[0]?.text;
+  let out = inner;
+  if (typeof inner === "string") { try { out = JSON.parse(inner); } catch { out = inner; } }
+  if (out && out.success === false) throw new Error(`${tool}: ${JSON.stringify(out.errors || out).slice(0, 240)}`);
+  return out;
+}
+
+const $ = id => document.getElementById(id);
+const status = (msg, kind = "") => { const s = $("status"); s.textContent = msg; s.className = kind; };
+const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+const store = { list: () => invoke("rig_list"), save: (name, json) => invoke("rig_save", { name, json }), remove: name => invoke("rig_remove", { name }) };
+const rig = createRig(mcp, m => status(m), store);
+const fill = (sel, items, label = x => x.name, value = x => x.id) => {
+  const keep = sel.value;
+  sel.innerHTML = items.map(x => `<option value="${value(x)}">${label(x)}</option>`).join("");
+  if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+};
+fill($("order"), Object.keys(ORDERS).map(name => ({ name, id: name })));
+$("order").value = "L, R, U, D";
+
+document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll("section[data-pane]").forEach(p => (p.hidden = p.dataset.pane !== b.dataset.tab));
+}));
+document.querySelectorAll(".bias input").forEach(r => r.addEventListener("input", () => (r.nextElementSibling.textContent = r.value)));
+
+async function refresh() {
+  const { list, active } = await rig.artboards();
+  fill($("artboard"), list);
+  if (active && !$("artboard").dataset.touched) $("artboard").value = active;
+  fill($("timeline"), await rig.timelines());
+  const joys = await rig.joysticks($("artboard").value);
+  fill($("joystick"), joys); fill($("uiJoystick"), joys);
+  const ms = await rig.manifests();
+  const joyRigs = ms.filter(m => m.kind === "joystick").map(m => ({ name: m.rig, id: m.rig }));
+  fill($("easeRig"), joyRigs); fill($("switchRig"), joyRigs);
+  fill($("uiSliderRig"), ms.filter(m => m.kind === "sliders").map(m => ({ name: m.rig, id: m.rig })));
+  fill($("rigs"), ms.map(m => ({ name: `${m.rig} · ${m.kind} · ${m.tracks.length} props`, id: m.rig })));
+  const em = ms.find(m => m.rig === $("easeRig").value);
+  if (em) document.querySelectorAll(".bias input").forEach(r => { r.value = em.bias?.[r.dataset.dir] || 0; r.nextElementSibling.textContent = r.value; });
+}
+$("artboard").addEventListener("change", () => { $("artboard").dataset.touched = "1"; refresh().catch(e => status(e.message, "err")); });
+$("easeRig").addEventListener("change", () => refresh().catch(e => status(e.message, "err")));
+
+// one action at a time; every button reports through the status line
+function action(id, fn) {
+  $(id).addEventListener("click", async () => {
+    document.querySelectorAll("button").forEach(b => (b.disabled = true));
+    const t0 = performance.now();
+    try {
+      const msg = await fn();
+      status(`${msg} (${((performance.now() - t0) / 1000).toFixed(1)} s)`, "ok");
+      await refresh();
+    } catch (e) { status(String(e.message || e), "err"); }
+    finally { document.querySelectorAll("button").forEach(b => (b.disabled = false)); }
+  });
+}
+const abName = () => $("artboard").selectedOptions[0]?.textContent;
+
+action("refresh", async () => { await refresh(); return "Lists refreshed."; });
+action("bindJoy", async () => {
+  if (!$("joystick").value) throw new Error("Add a joystick to the artboard first (J), then refresh.");
+  const m = await rig.bindJoystick({ artboardId: $("artboard").value, artboardName: abName(), timelineId: $("timeline").value,
+    order: ORDERS[$("order").value], rig: $("rig").value, joystickId: $("joystick").value,
+    removeKeys: $("removeKeys").checked, selectedOnly: $("selectedOnly").checked, bias: {} });
+  return `Bound ${m.tracks.length} properties to ${m.rig}.`;
+});
+action("applyEase", async () => {
+  const m = (await rig.manifests()).find(x => x.rig === $("easeRig").value);
+  if (!m) throw new Error("Bind a joystick first.");
+  const bias = {}; document.querySelectorAll(".bias input").forEach(r => (bias[r.dataset.dir] = +r.value));
+  await rig.setEaseBias(m, bias);
+  return "Ease bias applied.";
+});
+action("bindSliders", async () => {
+  const m = await rig.bindSliders({ artboardId: $("artboard").value, artboardName: abName(), timelineId: $("timeline").value,
+    rig: $("sliderRig").value, poses: +$("poses").value, allowNegative: $("negative").checked,
+    removeKeys: $("sliderRemoveKeys").checked, selectedOnly: $("sliderSelectedOnly").checked });
+  return `Bound ${m.tracks.length} properties to ${m.sliders.length} sliders.`;
+});
+action("bindUiSlider", async () => {
+  const m = (await rig.manifests()).find(x => x.rig === $("uiSliderRig").value);
+  if (!m) throw new Error("Bind sliders first.");
+  await rig.bindJoystickToSlider({ sliderRig: m.rig, slider: `${m.rig}_s${$("uiSlider").value}`, joystickId: $("uiJoystick").value,
+    axis: $("uiAxis").value, allowNegative: $("negative").checked });
+  return "Slider connected to the joystick.";
+});
+
+let switchItems = [];
+function drawItems() {
+  $("items").innerHTML = switchItems.map((it, i) => `<div class="row"><label title="${it.name}">${it.name}</label>
+    <input type="number" step="0.1" min="-1" max="1" value="${it.x}" data-i="${i}" data-k="x" />
+    <input type="number" step="0.1" min="-1" max="1" value="${it.y}" data-i="${i}" data-k="y" /></div>`).join("");
+  $("items").querySelectorAll("input").forEach(inp => inp.addEventListener("change", () => (switchItems[+inp.dataset.i][inp.dataset.k] = +inp.value)));
+}
+action("loadItems", async () => {
+  const sel = await rig.selection();
+  if (sel.length < 2) throw new Error("Select at least two items.");
+  switchItems = sel.map((o, i) => {          // start them on a ring; edit the spots below
+    const a = -Math.PI / 2 + (2 * Math.PI * i) / sel.length;
+    return { id: o.id, name: o.name || o.id, x: +Math.cos(a).toFixed(2), y: +Math.sin(a).toFixed(2) };
+  });
+  drawItems();
+  return `${sel.length} items loaded.`;
+});
+action("bindSwitch", async () => {
+  if (switchItems.length < 2) throw new Error("Load at least two items.");
+  await rig.bindSwitch({ joystickRig: $("switchRig").value, items: switchItems });
+  return `Switch bound to ${switchItems.length} items.`;
+});
+
+action("keyAll", async () => `Keyed ${await rig.keyAll({ timelineId: $("timeline").value, frame: +$("toolFrame").value })} properties.`);
+action("pasteOrigin", async () => `Pasted ${await rig.pasteOrigin({ timelineId: $("timeline").value, frame: +$("toolFrame").value, overwrite: $("overwrite").checked })} keys.`);
+action("unkeyFlat", async () => `Removed ${await rig.unkeyFlat({ timelineId: $("timeline").value, poses: +$("flatPoses").value })} flat tracks.`);
+action("flipH", async () => `Flipped ${await rig.pathFlip({ vertical: false })} vertices.`);
+action("flipV", async () => `Flipped ${await rig.pathFlip({ vertical: true })} vertices.`);
+action("unbind", async () => {
+  const m = (await rig.manifests()).find(x => x.rig === $("rigs").value);
+  if (!m) throw new Error("Nothing to unbind.");
+  const r = await rig.unbind(m);
+  return `Unbound ${m.rig}: ${r.binds} binds removed, ${r.restored} tracks restored${r.leftovers ? `, ${r.leftovers} objects to delete by hand` : ""}.`;
+});
+
+// keep trying until Rive is up with a file open, so launch order never matters
+(async () => {
+  try { $("appver").textContent = "v" + await window.__TAURI__.core.invoke("app_version"); } catch {}
+  for (let attempt = 1; ; attempt++) {
+    try { await refresh(); status("Connected to the Rive editor.", "ok"); return; }
+    catch (e) { status(`Waiting for Rive (editor running with a file open?)… retry ${attempt}. ${e.message || e}`, "err"); await new Promise(r => setTimeout(r, 3000)); }
+  }
+})();
+</script>
+</body>
+</html>
