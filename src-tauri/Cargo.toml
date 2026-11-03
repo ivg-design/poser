@@ -1,6 +1,6 @@
 [package]
 name = "poser"
-version = "3.0.0"
+version = "3.1.0"
 description = "Poser — floating panel that rigs Joysticks 'n Sliders-style pose controls in the Rive editor via its MCP server"
 authors = ["IVG Design"]
 edition = "2021"

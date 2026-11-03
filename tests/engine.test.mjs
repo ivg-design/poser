@@ -63,6 +63,8 @@ test("switch formula keeps only the nearest item visible", () => {
     .replace(/\{\{H\/j_x\}\}/g, `(${x})`).replace(/\{\{H\/j_y\}\}/g, `(${y})`)};`)(pow, min, max, ceil);
   assert.deepEqual([0, 1, 2].map(i => run(i, 0.9, 0.1)), [0, 1, 0]);
   assert.deepEqual([0, 1, 2].map(i => run(i, -0.2, -0.9)), [0, 0, 1]);
+  // Rive's formula parser rejects a minus followed by a negative number
+  assert.ok(items.every((_, i) => !/-\s*-/.test(switchFormula("H", "j", items, i))));
 });
 
 test("ease bias: 0 is linear, +100 sine-out, −100 sine-in; mirrored for edge→centre keys", () => {

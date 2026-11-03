@@ -88,7 +88,10 @@ node tools/poser-cli.mjs list
   playing pose timeline) wins over the bind, so remove it.
 - **Numbers only.** Transforms, opacity, vertices, bones and path points are covered. Colours are
   not, because formula converters work on numbers.
-- **Stale converter entries.** After Unbind, the editor's converter list can keep stale entries
-  until the file is reloaded.
+- **Leftover binds after Unbind.** An editor session can keep listing binds that Unbind deleted
+  until the file is reloaded (seen after a long session; a freshly loaded file drops them at once),
+  and a new bind on one of those properties would only retarget the leftover. Unbind checks for
+  them and asks for a reload (Cmd+R) when there are any; Poser refuses a still-bound property and
+  says why. The editor's converter list can also keep stale entries until a reload.
 - **Cloud lag.** Edits made over MCP reach the cloud copy of the file a few minutes later, so
   `rive pull` sees them late.

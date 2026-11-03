@@ -103,7 +103,30 @@ export function createRig(mcp, log = () => {}, store) {
   // objects that follow it, in order. Unbind deletes exactly those.
   const idNum = id => +String(id).split("-")[1];
   const idAt = (id, n) => `${String(id).split("-")[0]}-${n}`;
+  // databind on a property that is already bound retargets that bind instead of adding one, and it
+  // keeps its old converter and direction. listDataBinds gives no bind ids, so Poser can't remove a
+  // bind it didn't record: a property that is still bound is refused before anything is made
+  // An editor session can keep listing a bind deleted over MCP until the file is reloaded (seen
+  // after a long session; a fresh one drops it at once), so what Unbind removed is remembered
+  const allBinds = async () =>
+    (await mcp("viewmodel_editor", { command: "listDataBinds", data: { listDataBinds: {} } })).dataBinds || [];
+  const unbound = new Set();
+  const pair = d => `${d.objectId}:${d.propertyKey}`;
+  // a leftover's view model property is gone, so the editor lists it as unresolved
+  const boundError = (taken, other) => {
+    const more = n => (n > 1 ? ` and ${n - 1} more` : "");
+    const live = taken.filter(t => !t.unresolved && t.viewModelPropertyName && !unbound.has(pair(t)));
+    if (!live.length) {
+      const d = taken[0];
+      return new Error(`"${d.objectName}" ${d.property}${more(taken.length)} still ${taken.length > 1 ? "have binds" : "has a bind"} left from a removed rig: the editor keeps removed binds until the file is reloaded. Reload the file (Cmd+R), then bind again. If it is still listed after the reload, remove it in the editor.`);
+    }
+    const d = live[0];
+    return new Error(`"${d.objectName}" ${d.property} is still bound to ${d.viewModelPropertyName}${more(live.length)}. Remove that bind in the editor, or ${other}.`);
+  };
   async function bind(vmId, bindings, artboardId) {
+    const want = new Set(bindings.map(pair));
+    const taken = (await allBinds()).filter(d => want.has(pair(d)));
+    if (taken.length) throw boundError(taken, "use other objects");
     const ids = [];
     for (const part of chunks(bindings)) {
       const marker = (await mcp("group_editor", { name: "poser marker", parentId: artboardId })).group.id;
@@ -215,6 +238,7 @@ export function createRig(mcp, log = () => {}, store) {
   let warning = "";
   const takeWarning = () => { const w = warning; warning = ""; return w; };
   async function saveManifest(m) {
+    m.savedAt = Date.now();
     await store.save(manifestName(m), JSON.stringify(m));
     try { await saveRecordScript(m); } catch (e) { warning = String(e.message || e); }
   }
@@ -233,14 +257,15 @@ export function createRig(mcp, log = () => {}, store) {
     await writeScript(name, recordText(m, language));
   }
 
-  // the records in the open file win over the app's copies
+  // the newer of the two copies wins (the in-file one when neither carries a save time),
+  // so a failed in-file write never brings back an older record
   async function manifests() {
     const file = await fileKey();
     const byRig = new Map((await store.list()).map(j => JSON.parse(j)).filter(m => m.file === file).map(m => [m.rig, m]));
     for (const a of await recordAssets()) {
       let m = null;
       try { m = parseRecord(await readScript(a.name)); } catch {}
-      if (m?.rig) byRig.set(m.rig, { ...m, file });
+      if (m?.rig && (m.savedAt || 0) >= (byRig.get(m.rig)?.savedAt || 0)) byRig.set(m.rig, { ...m, file });
     }
     return [...byRig.values()];
   }
@@ -258,7 +283,25 @@ export function createRig(mcp, log = () => {}, store) {
     const other = ms.find(m => m.rig !== rig && m.timelineId === timelineId);
     if (other) throw new Error(`That timeline is already rigged as "${other.rig}". Use rig name "${other.rig}" to rebind it, or unbind it in Tools.`);
     const same = ms.find(m => m.rig === rig);
-    if (same) { log(`Rig "${rig}" exists: unbinding it first.`); await unbind(same); }
+    if (same) {
+      log(`Rig "${rig}" exists: unbinding it first.`);
+      const r = await unbind(same);
+      if (r.left) throw new Error(`Rig "${rig}" existed, so Poser unbound it and put its keys back, but the editor still lists ${r.left} of its binds until the file is reloaded. Reload the file (Cmd+R), then bind again.`);
+    }
+  }
+
+  // one rig per joystick axis: a second bind on the same joystick property leaves the editor with
+  // two binds there, and the direction change can land on the old one
+  async function joystickFree(joystickId, axes, rig) {
+    for (const m of await manifests()) {
+      if (m.kind === "joystick" && m.rig !== rig && m.joystickId === joystickId)
+        throw new Error(`That joystick already drives the rig "${m.rig}". Unbind it first, or add another joystick (J).`);
+      const c = (m.connections || []).find(c => c.joystickId === joystickId && axes.includes(c.axis));
+      if (c) throw new Error(`That joystick's ${c.axis} already drives ${c.slider} of the NumInput rig "${m.rig}". Unbind that rig first, or add another joystick (J).`);
+    }
+    const keys = axes.map(a => (a === "x" ? 299 : 300));
+    const live = (await allBinds()).filter(d => d.objectId === joystickId && keys.includes(d.propertyKey));
+    if (live.length) throw boundError(live, "add another joystick (J)");
   }
 
   function noChanges(tracks, scope) {
@@ -274,6 +317,7 @@ export function createRig(mcp, log = () => {}, store) {
     rig = E.safeName(rig);
     const file = await fileKey();
     await claim(file, timelineId, rig);
+    await joystickFree(joystickId, ["x", "y"], rig);
     const scope = selectedOnly ? await selectedScope() : null;
     const tracks = await poseTracks(timelineId, scope);
     const frames = [0, 1, 2, 3, 4];
@@ -494,6 +538,7 @@ export function createRig(mcp, log = () => {}, store) {
     const script = await ensureScript(rig, artboardId);   // before claim unbinds an earlier rig
     if (language && language !== script.language) log(`This file runs ${script.language === "luau" ? "Luau" : "AnimaScript"} scripts, so the rig script is ${script.language === "luau" ? "Luau" : "AnimaScript"}.`);
     await claim(file, timelineId, rig);
+    await joystickFree(joystickId, ["x", "y"], rig);
     const scope = selectedOnly ? await selectedScope() : null;
     const tracks = await poseTracks(timelineId, scope);
     const rows = [];
@@ -609,6 +654,7 @@ export function createRig(mcp, log = () => {}, store) {
   async function bindJoystickToSlider({ sliderRig, slider, joystickId, axis, allowNegative }) {
     const m = (await manifests()).find(x => x.kind === "sliders" && x.rig === sliderRig);
     if (!m) throw new Error("Bind a NumInput rig first.");
+    await joystickFree(joystickId, [axis]);
     const vm = ((await mcp("viewmodel_editor", { command: "listViewModels" })).viewModels || []).find(v => v.id === m.vmId);
     const sliderPropId = vm.viewModelProperties.find(p => p.name === slider)?.id;
     const formula = allowNegative ? "{Input} * 100" : "max(0, {Input}) * 100";
@@ -618,6 +664,7 @@ export function createRig(mcp, log = () => {}, store) {
     await toSource([{ objectId: joystickId, propertyKey }]);
     m.binds = [...(m.binds || []), ...ids];
     m.converters = [...(m.converters || []), cid];
+    m.connections = [...(m.connections || []), { joystickId, axis, slider, bind: ids[0], converter: cid }];
     await saveManifest(m);
   }
 
@@ -640,6 +687,13 @@ export function createRig(mcp, log = () => {}, store) {
 
   async function unbind(m) {
     const binds = m.binds || [];
+    const vm0 = ((await mcp("viewmodel_editor", { command: "listViewModels" })).viewModels || []).find(v => v.id === m.vmId);
+    const rigProps = new Set((vm0?.viewModelProperties || []).filter(p => (m.addedProps || []).includes(p.name)).map(p => p.id));
+    const rigConv = new Set([...(m.converters || []), ...(m.switches || []).map(s => s.converter)]);
+    const mine = new Set();
+    for (const d of await allBinds())
+      if (rigProps.has(d.viewModelPropertyId) || rigConv.has(d.converterId) || (m.poseVmId && d.viewModelId === m.poseVmId)) mine.add(pair(d));
+    for (const k of mine) unbound.add(k);
     for (const part of chunks(binds, 400)) await mcp("delete_objects", { objectIds: part });
     if (m.keysRemoved) {
       const add = m.tracks.flatMap(t => t.keys.map(k => ({ objectId: t.objectId, propertyKey: t.propertyKey, frame: k.frame, value: k.value, interpolationType: k.interpolationType || "linear" })));
@@ -667,7 +721,9 @@ export function createRig(mcp, log = () => {}, store) {
     const propIds = (vm?.viewModelProperties || []).filter(p => (m.addedProps || []).includes(p.name)).map(p => p.id);
     if (propIds.length) await mcp("delete_objects", { objectIds: propIds });
     await dropManifest(m);
-    return { binds: binds.length, restored: m.keysRemoved ? m.tracks.length : 0, leftovers };
+    // binds the editor still lists would be retargeted, not replaced, by the next bind there
+    const left = (await allBinds()).filter(d => mine.has(pair(d))).length;
+    return { binds: binds.length, restored: m.keysRemoved ? m.tracks.length : 0, leftovers, left };
   }
 
   // ------------------------------------------------------------ tools
@@ -722,7 +778,8 @@ export function createRig(mcp, log = () => {}, store) {
     const sel = await selection();
     if (sel.length !== 1) throw new Error("Select one path.");
     const r = await mcp("query_objects", { objectIds: [sel[0].id], depth: 1 });
-    const kids = (r.objects?.[0]?.children || []).map(c => (typeof c === "string" ? c : c.id));
+    const path = (r.objects || []).find(o => o.id === sel[0].id);
+    const kids = (path?.children || []).map(c => (typeof c === "string" ? c : c.id));
     const vk = { x: 24, y: 25, rotation: 84, inRotation: 79, outRotation: 81 };
     const q = await mcp("query_property_values", { propertyKeys: Object.fromEntries(kids.map(id => [id, Object.values(vk)])) });
     const verts = kids.map(id => {

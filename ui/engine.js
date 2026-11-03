@@ -98,7 +98,9 @@ export function sliderFormula(vmName, rig, values, allowNegative) {
 // switch: 1 when this item is (one of) the nearest to the joystick position, else 0
 export function switchFormula(vmName, rig, items, index) {
   const x = vmRef(vmName, `${rig}_x`), y = vmRef(vmName, `${rig}_y`);
-  const d = it => `(pow(${x} - ${num(it.x)}, 2) + pow(${y} - ${num(it.y)}, 2))`;
+  // Rive's formula parser rejects "a - -0.5", so a negative spot is added instead of subtracted
+  const less = (a, c) => (num(c).startsWith("-") ? `${a} + ${num(-c)}` : `${a} - ${num(c)}`);
+  const d = it => `(pow(${less(x, it.x)}, 2) + pow(${less(y, it.y)}, 2))`;
   const nearest = items.map(d).reduce((acc, term) => (acc ? `min(${acc}, ${term})` : term), "");
   return `1 - min(1, ceil(max(0, ${d(items[index])} - ${nearest}) * 1000000))`;
 }

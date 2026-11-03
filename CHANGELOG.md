@@ -2,7 +2,7 @@
 
 All notable changes to Poser, newest first.
 
-## [Unreleased]
+## [3.1.0] — 2026-11-03
 
 ### Added
 - **Script drive** for joystick rigs (Drive → One script), in AnimaScript or Luau. One generated
@@ -29,6 +29,19 @@ All notable changes to Poser, newest first.
   ("Rive isn't running…") instead of the raw connection error.
 
 ### Fixed
+- PathFlipper finds the selected path when the editor lists its vertices before the path itself.
+- Toggler spots with a negative position bind again: the formula adds the offset instead of
+  writing a minus followed by a negative number, which Rive's formula parser rejects.
+- A rig's record in the file no longer overrides a newer copy in Poser: each record carries its save
+  time and the newer one wins, so an in-file write that failed can't bring back an older record.
+- Reusing a joystick or a posed object after Unbind no longer fails with "Bound 6 properties but
+  found 5 bind objects". An editor session can keep listing a bind deleted over MCP until the file
+  is reloaded, and a new bind on that property retargets the leftover (keeping its converter and
+  direction) instead of adding one. Poser now checks for binds before it creates anything, refuses
+  a property that is still bound and says why (a leftover from a removed rig: reload the file; a
+  live bind: remove it). Unbind checks for leftovers and asks for a reload only when there are
+  some. A joystick axis drives one rig at a time: another rig or a NumInput connection on the
+  same axis is refused.
 - The panel connects again: the bridge keeps the MCP session id.
 - Binding a timeline that is already rigged explains why instead of reporting no changes. The
   same rig name rebinds it (unbind first, then bind); another name is refused.

@@ -318,7 +318,7 @@ action("unbind", async () => {
   const m = (await rig.manifests()).find(x => x.rig === $("rigs").value);
   if (!m) throw new Error("Nothing to unbind.");
   const r = await rig.unbind(m);
-  return `Unbound ${m.rig}: ${r.binds} binds removed, ${r.restored} tracks restored${r.leftovers ? `, ${r.leftovers} objects to delete by hand` : ""}.`
+  return `Unbound ${m.rig}: ${r.binds} binds removed, ${r.restored} tracks restored${r.leftovers ? `, ${r.leftovers} objects to delete by hand` : ""}${r.left ? `. The editor still lists ${r.left} of the removed binds: reload the file (Cmd+R) before binding these objects or this joystick again` : ""}.`
     + (m.drive === "script" ? ` The "${m.script}" script is still on the artboard: delete it there.` : "");
 });
 
