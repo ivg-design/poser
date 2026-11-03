@@ -3,6 +3,7 @@ name = "poser"
 version = "3.1.0"
 description = "Poser — floating panel that rigs Joysticks 'n Sliders-style pose controls in the Rive editor via its MCP server"
 authors = ["IVG Design"]
+license = "MIT"
 edition = "2021"
 
 [build-dependencies]

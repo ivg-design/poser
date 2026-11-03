@@ -95,3 +95,7 @@ node tools/poser-cli.mjs list
   says why. The editor's converter list can also keep stale entries until a reload.
 - **Cloud lag.** Edits made over MCP reach the cloud copy of the file a few minutes later, so
   `rive pull` sees them late.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
