@@ -6,16 +6,28 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tauri::Manager;
 
 const MCP_URL: &str = "http://127.0.0.1:9791/mcp";
 
+// The server hands out a session id on initialize and answers 400 to any
+// later request that does not carry it.
+static SESSION: Mutex<Option<String>> = Mutex::new(None);
+
 fn post(payload: &str) -> Result<String, String> {
-    let resp = ureq::post(MCP_URL)
+    let mut req = ureq::post(MCP_URL)
         .set("Content-Type", "application/json")
-        .set("Accept", "application/json, text/event-stream")
+        .set("Accept", "application/json, text/event-stream");
+    if let Some(sid) = SESSION.lock().unwrap().clone() {
+        req = req.set("mcp-session-id", &sid);
+    }
+    let resp = req
         .send_string(payload)
         .map_err(|e| format!("MCP request failed: {e}"))?;
+    if let Some(sid) = resp.header("mcp-session-id") {
+        *SESSION.lock().unwrap() = Some(sid.to_string());
+    }
     resp.into_string()
         .map_err(|e| format!("MCP response read failed: {e}"))
 }
@@ -23,6 +35,7 @@ fn post(payload: &str) -> Result<String, String> {
 // The Rive MCP server requires the initialize handshake after every editor
 // restart; until then tools/call returns 400 "Server not initialized".
 fn handshake() -> Result<(), String> {
+    *SESSION.lock().unwrap() = None;
     post(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"poser","version":"3.0.0"}}}"#)?;
     // Notification: server replies 202 with an empty body; errors are fine to ignore.
     let _ = post(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);

@@ -15,7 +15,8 @@
     user-select: none; -webkit-user-select: none;
   }
   .wrap { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-  header { display: flex; align-items: baseline; gap: 8px; }
+  header { display: flex; align-items: center; gap: 8px; }
+  header img { height: 18px; width: auto; }
   header b { font-size: 15px; letter-spacing: .02em; }
   header span { color: var(--dim); font-size: 11px; }
   .tabs { display: flex; gap: 4px; }
@@ -39,18 +40,22 @@
   .hint { color: var(--dim); font-size: 11px; }
   .check { display: flex; align-items: center; gap: 6px; color: var(--dim); }
   .bias { display: grid; grid-template-columns: 18px 1fr 36px; gap: 4px 6px; align-items: center; }
-  .bias span:last-child { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .bias output { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
   .items { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow: auto; }
   .items .row label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .items input { width: 56px; flex: 0 0 56px; }
-  #status { min-height: 32px; padding: 6px 8px; border-radius: 6px; background: var(--panel); color: var(--dim); white-space: pre-wrap; }
+  #status { padding: 6px 8px; border-radius: 6px; background: var(--panel); color: var(--dim); white-space: pre-wrap; }
   #status.ok { color: var(--ok); } #status.err { color: var(--err); }
   [hidden] { display: none !important; }
+  /* the window fits its content (fitWindow), so nothing shows a scrollbar */
+  html, body { height: 100%; }
+  body { overflow-y: auto; }
+  ::-webkit-scrollbar { display: none; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <header><b>Poser</b><span id="appver"></span><span style="margin-left:auto">pose rigs for Rive</span></header>
+  <header><img src="logo.png" alt="" /><b>Poser</b><span id="appver"></span><span style="margin-left:auto">pose rigs for Rive</span></header>
 
   <div class="card">
     <div class="row"><label>Artboard</label><select id="artboard"></select></div>
@@ -60,8 +65,8 @@
 
   <div class="tabs">
     <button data-tab="joystick" class="on">Joystick</button>
-    <button data-tab="sliders">Sliders</button>
-    <button data-tab="switch">Switch</button>
+    <button data-tab="sliders">NumInput</button>
+    <button data-tab="switch">Toggler</button>
     <button data-tab="tools">Tools</button>
   </div>
 
@@ -69,7 +74,12 @@
   <section data-pane="joystick">
     <div class="card">
       <h3>Bind</h3>
-      <p class="hint">Key the origin on frame 0 and the four extremes on frames 1–4, keying every property on every pose. Add a joystick (J) to the artboard, then bind. The panel bakes each pose into a formula, so the rig runs with no script.</p>
+      <p class="hint">Key the origin on frame 0 and the four extremes on frames 1–4, keying every property on every pose. Add a joystick (J) to the artboard, then bind.</p>
+      <div class="row"><label>Drive</label><select id="drive">
+        <option value="formula">Formula converters</option>
+        <option value="script">One script</option>
+      </select></div>
+      <p class="hint" id="driveHint"></p>
       <div class="row"><label>Frame order</label><select id="order"></select></div>
       <div class="row"><label>Joystick</label><select id="joystick"></select></div>
       <div class="row"><label>Rig name</label><input type="text" id="rig" value="look" /></div>
@@ -82,47 +92,52 @@
       <p class="hint">−100 eases in, +100 eases out, 0 is linear (per direction, like J&amp;S EaseBias).</p>
       <div class="row"><label>Rig</label><select id="easeRig"></select></div>
       <div class="bias">
-        <span>L</span><input type="range" min="-100" max="100" value="0" data-dir="L" /><span>0</span>
-        <span>R</span><input type="range" min="-100" max="100" value="0" data-dir="R" /><span>0</span>
-        <span>U</span><input type="range" min="-100" max="100" value="0" data-dir="U" /><span>0</span>
-        <span>D</span><input type="range" min="-100" max="100" value="0" data-dir="D" /><span>0</span>
+        <span>L</span><input type="range" min="-100" max="100" value="0" data-dir="L" /><output>0</output>
+        <span>R</span><input type="range" min="-100" max="100" value="0" data-dir="R" /><output>0</output>
+        <span>U</span><input type="range" min="-100" max="100" value="0" data-dir="U" /><output>0</output>
+        <span>D</span><input type="range" min="-100" max="100" value="0" data-dir="D" /><output>0</output>
       </div>
       <button id="applyEase">Apply ease bias</button>
     </div>
+    <div class="card">
+      <h3>Rigs in this file</h3>
+      <div class="row"><select id="rigs"></select><button id="unbind" style="flex:0 0 auto">Unbind</button></div>
+      <p class="hint">Unbind removes what the panel created and puts the pose keys back. Each rig's record also lives in the file, in the script "poser &lt;rig&gt; dataBkp".</p>
+    </div>
   </section>
 
-  <!-- Sliders -->
+  <!-- NumInput -->
   <section data-pane="sliders" hidden>
     <div class="card">
       <h3>Bind</h3>
-      <p class="hint">The origin goes on frame 0 and one pose on each following frame. Each pose becomes a slider (0–100) in the artboard's view model, and sliders add together like blend shapes.</p>
+      <p class="hint">The origin goes on frame 0 and one pose on each following frame. Each pose becomes a number input (0–100) in the artboard's view model, and the inputs add together like blend shapes.</p>
       <div class="row"><label>Poses</label><input type="number" id="poses" min="1" max="64" value="4" /></div>
-      <div class="row"><label>Rig name</label><input type="text" id="sliderRig" value="sliders" /></div>
+      <div class="row"><label>Rig name</label><input type="text" id="sliderRig" value="numinput" /></div>
       <label class="check"><input type="checkbox" id="negative" /> Negative values give the inverse pose</label>
       <label class="check"><input type="checkbox" id="sliderSelectedOnly" /> Only the selection</label>
       <label class="check"><input type="checkbox" id="sliderRemoveKeys" checked /> Remove the pose keys</label>
-      <button class="primary" id="bindSliders">Bind to sliders</button>
+      <button class="primary" id="bindSliders">Bind to NumInput</button>
     </div>
     <div class="card">
-      <h3>UI slider</h3>
-      <p class="hint">Drive a slider from a joystick axis, so it can be dragged and keyed on the canvas.</p>
-      <div class="row"><label>Slider rig</label><select id="uiSliderRig"></select></div>
-      <div class="row"><label>Slider</label><input type="number" id="uiSlider" min="1" value="1" /></div>
+      <h3>Joystick control</h3>
+      <p class="hint">Drive one input from a joystick axis, so it can be dragged and keyed on the canvas.</p>
+      <div class="row"><label>NumInput rig</label><select id="uiSliderRig"></select></div>
+      <div class="row"><label>Input</label><input type="number" id="uiSlider" min="1" value="1" /></div>
       <div class="row"><label>Joystick</label><select id="uiJoystick"></select></div>
       <div class="row"><label>Axis</label><select id="uiAxis"><option value="x">x</option><option value="y">y</option></select></div>
       <button id="bindUiSlider">Connect</button>
     </div>
   </section>
 
-  <!-- Switch -->
+  <!-- Toggler -->
   <section data-pane="switch" hidden>
     <div class="card">
-      <h3>Switch</h3>
+      <h3>Toggler</h3>
       <p class="hint">Select the swap items (mouths, noses…). Each one gets a spot on the joystick (−1 to 1, y down), and only the item nearest the joystick stays visible.</p>
       <div class="row"><label>Joystick rig</label><select id="switchRig"></select></div>
       <button id="loadItems">Use selected items</button>
       <div class="items" id="items"></div>
-      <button class="primary" id="bindSwitch">Bind switch</button>
+      <button class="primary" id="bindSwitch">Bind toggler</button>
     </div>
   </section>
 
@@ -141,11 +156,6 @@
       <h3>PathFlipper</h3>
       <div class="row"><button id="flipH">Flip horizontal</button><button id="flipV">Flip vertical</button></div>
       <p class="hint">Mirrors the selected path around its first vertex.</p>
-    </div>
-    <div class="card">
-      <h3>Rigs in this file</h3>
-      <div class="row"><select id="rigs"></select><button id="unbind" style="flex:0 0 auto">Unbind</button></div>
-      <p class="hint">Unbind removes what the panel created and puts the pose keys back.</p>
     </div>
   </section>
 
@@ -170,7 +180,16 @@ async function mcp(tool, args) {
 }
 
 const $ = id => document.getElementById(id);
-const status = (msg, kind = "") => { const s = $("status"); s.textContent = msg; s.className = kind; };
+// what a failure means to the person using the panel; the raw error goes to the console
+const REFUSED = /Connection refused|Connect error|Connection Failed|os error 61|timed out/i;
+function explain(e) {
+  const raw = String(e?.message || e);
+  console.warn(raw);
+  if (REFUSED.test(raw)) return "Can't reach the Rive editor. Open Rive with a file and Poser connects by itself.";
+  if (/status code 4\d\d/i.test(raw)) return "The Rive editor refused the request. Quit and reopen Poser; if that doesn't help, restart Rive.";
+  return raw;
+}
+const status = (msg, kind = "") => { const s = $("status"); s.textContent = msg || ""; s.className = kind; s.hidden = !msg; };
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
 const store = { list: () => invoke("rig_list"), save: (name, json) => invoke("rig_save", { name, json }), remove: name => invoke("rig_remove", { name }) };
 const rig = createRig(mcp, m => status(m), store);
@@ -197,7 +216,8 @@ async function refresh() {
   fill($("joystick"), joys); fill($("uiJoystick"), joys);
   const ms = await rig.manifests();
   const joyRigs = ms.filter(m => m.kind === "joystick").map(m => ({ name: m.rig, id: m.rig }));
-  fill($("easeRig"), joyRigs); fill($("switchRig"), joyRigs);
+  fill($("easeRig"), joyRigs);
+  fill($("switchRig"), ms.filter(m => m.kind === "joystick" && m.drive !== "script").map(m => ({ name: m.rig, id: m.rig })));
   fill($("uiSliderRig"), ms.filter(m => m.kind === "sliders").map(m => ({ name: m.rig, id: m.rig })));
   fill($("rigs"), ms.map(m => ({ name: `${m.rig} · ${m.kind} · ${m.tracks.length} props`, id: m.rig })));
   const em = ms.find(m => m.rig === $("easeRig").value);
@@ -207,27 +227,43 @@ $("artboard").addEventListener("change", () => { $("artboard").dataset.touched =
 $("easeRig").addEventListener("change", () => refresh().catch(e => status(e.message, "err")));
 
 // one action at a time; every button reports through the status line
+let busy = false;                           // an action is talking to Rive; the watcher waits
 function action(id, fn) {
   $(id).addEventListener("click", async () => {
+    busy = true;
     document.querySelectorAll("button").forEach(b => (b.disabled = true));
     const t0 = performance.now();
     try {
       const msg = await fn();
-      status(`${msg} (${((performance.now() - t0) / 1000).toFixed(1)} s)`, "ok");
+      const warn = rig.takeWarning();
+      status(`${msg}${warn ? " " + warn : ""} (${((performance.now() - t0) / 1000).toFixed(1)} s)`, warn ? "err" : "ok");
       await refresh();
-    } catch (e) { status(String(e.message || e), "err"); }
-    finally { document.querySelectorAll("button").forEach(b => (b.disabled = false)); }
+    } catch (e) { status(explain(e), "err"); }
+    finally { busy = false; document.querySelectorAll("button").forEach(b => (b.disabled = false)); }
   });
 }
 const abName = () => $("artboard").selectedOptions[0]?.textContent;
 
 action("refresh", async () => { await refresh(); return "Lists refreshed."; });
+const DRIVE_HINTS = {
+  formula: "Each pose is baked into one formula converter per property. No script runs.",
+  script: () => `One script computes every posed value, with no converters. Poser creates the Node script "poser ${$("rig").value.trim() || "look"}" and places it; a file with no placed script yet needs it dragged onto the artboard once. Luau files only: the editor can't make Node scripts in an AnimaScript file.`,
+};
+function driveHint() {
+  const h = DRIVE_HINTS[$("drive").value];
+  $("driveHint").textContent = typeof h === "function" ? h() : h;
+}
+$("drive").addEventListener("change", driveHint);
+$("rig").addEventListener("input", driveHint);
+driveHint();
+
 action("bindJoy", async () => {
   if (!$("joystick").value) throw new Error("Add a joystick to the artboard first (J), then refresh.");
-  const m = await rig.bindJoystick({ artboardId: $("artboard").value, artboardName: abName(), timelineId: $("timeline").value,
+  const bindFn = $("drive").value === "script" ? rig.bindJoystickScript : rig.bindJoystick;
+  const m = await bindFn({ artboardId: $("artboard").value, artboardName: abName(), timelineId: $("timeline").value,
     order: ORDERS[$("order").value], rig: $("rig").value, joystickId: $("joystick").value,
     removeKeys: $("removeKeys").checked, selectedOnly: $("selectedOnly").checked, bias: {} });
-  return `Bound ${m.tracks.length} properties to ${m.rig}.`;
+  return `Bound ${m.tracks.length} properties to ${m.rig}${m.drive === "script" ? ` through the "${m.script}" script` : ""}.${m.note ? " " + m.note : ""}`;
 });
 action("applyEase", async () => {
   const m = (await rig.manifests()).find(x => x.rig === $("easeRig").value);
@@ -240,14 +276,14 @@ action("bindSliders", async () => {
   const m = await rig.bindSliders({ artboardId: $("artboard").value, artboardName: abName(), timelineId: $("timeline").value,
     rig: $("sliderRig").value, poses: +$("poses").value, allowNegative: $("negative").checked,
     removeKeys: $("sliderRemoveKeys").checked, selectedOnly: $("sliderSelectedOnly").checked });
-  return `Bound ${m.tracks.length} properties to ${m.sliders.length} sliders.`;
+  return `Bound ${m.tracks.length} properties to ${m.sliders.length} inputs.`;
 });
 action("bindUiSlider", async () => {
   const m = (await rig.manifests()).find(x => x.rig === $("uiSliderRig").value);
-  if (!m) throw new Error("Bind sliders first.");
+  if (!m) throw new Error("Bind a NumInput rig first.");
   await rig.bindJoystickToSlider({ sliderRig: m.rig, slider: `${m.rig}_s${$("uiSlider").value}`, joystickId: $("uiJoystick").value,
     axis: $("uiAxis").value, allowNegative: $("negative").checked });
-  return "Slider connected to the joystick.";
+  return "Input connected to the joystick.";
 });
 
 let switchItems = [];
@@ -270,7 +306,7 @@ action("loadItems", async () => {
 action("bindSwitch", async () => {
   if (switchItems.length < 2) throw new Error("Load at least two items.");
   await rig.bindSwitch({ joystickRig: $("switchRig").value, items: switchItems });
-  return `Switch bound to ${switchItems.length} items.`;
+  return `Toggler bound to ${switchItems.length} items.`;
 });
 
 action("keyAll", async () => `Keyed ${await rig.keyAll({ timelineId: $("timeline").value, frame: +$("toolFrame").value })} properties.`);
@@ -282,15 +318,66 @@ action("unbind", async () => {
   const m = (await rig.manifests()).find(x => x.rig === $("rigs").value);
   if (!m) throw new Error("Nothing to unbind.");
   const r = await rig.unbind(m);
-  return `Unbound ${m.rig}: ${r.binds} binds removed, ${r.restored} tracks restored${r.leftovers ? `, ${r.leftovers} objects to delete by hand` : ""}.`;
+  return `Unbound ${m.rig}: ${r.binds} binds removed, ${r.restored} tracks restored${r.leftovers ? `, ${r.leftovers} objects to delete by hand` : ""}.`
+    + (m.drive === "script" ? ` The "${m.script}" script is still on the artboard: delete it there.` : "");
 });
 
-// keep trying until Rive is up with a file open, so launch order never matters
+// the window is exactly as tall as what it shows, so it never scrolls or leaves empty space
+const fitWindow = (() => {
+  const win = window.__TAURI__?.window?.getCurrentWindow?.();
+  const LogicalSize = window.__TAURI__?.dpi?.LogicalSize;
+  if (!win || !LogicalSize) return () => {};
+  // macOS sizes the whole window, title bar included: `extra` is that difference, learned by
+  // measuring the content area after each resize
+  let last = 0, extra = 0, queued = false;
+  const settle = () => new Promise(r => setTimeout(r, 60));
+  return () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(async () => {
+      queued = false;
+      const h = Math.min(Math.ceil(document.querySelector(".wrap").getBoundingClientRect().height), screen.availHeight - 60);
+      if (h === last) return;
+      last = h;
+      try {
+        await win.setSize(new LogicalSize(window.innerWidth, h + extra));
+        await settle();
+        const lack = h - window.innerHeight;
+        if (Math.abs(lack) >= 1) {
+          extra += lack;
+          await win.setSize(new LogicalSize(window.innerWidth, h + extra));
+        }
+      } catch (e) { console.warn("fitWindow", e); }
+    });
+  };
+})();
+new ResizeObserver(fitWindow).observe(document.querySelector(".wrap"));
+
+// watch Rive the whole time: wait for it at launch, notice when it quits or another file
+// opens, and reconnect by itself, so launch order never matters
 (async () => {
   try { $("appver").textContent = "v" + await window.__TAURI__.core.invoke("app_version"); } catch {}
-  for (let attempt = 1; ; attempt++) {
-    try { await refresh(); status("Connected to the Rive editor.", "ok"); return; }
-    catch (e) { status(`Waiting for Rive (editor running with a file open?)… retry ${attempt}. ${e.message || e}`, "err"); await new Promise(r => setTimeout(r, 3000)); }
+  let state = "", fileId = null;
+  const show = (next, msg, kind) => { if (next !== state) status(msg, kind); state = next; };
+  for (;;) {
+    if (!busy) {
+      try {
+        const s = await mcp("session_info", {});
+        if (!s.activeFileId) show("nofile", "Rive is running. Open a file in the editor and Poser picks it up.", "err");
+        else if (state !== "ok" || s.activeFileId !== fileId) {
+          await refresh();
+          show("ok", `Connected to ${s.activeFileName || "the open file"}.`, "ok");
+          if (s.activeFileId !== fileId && fileId) status(`Switched to ${s.activeFileName || "the open file"}.`, "ok");
+          fileId = s.activeFileId;
+        }
+      } catch (e) {
+        const raw = String(e?.message || e);
+        console.warn(raw);
+        if (REFUSED.test(raw)) show("down", "Rive isn't running. Open the Rive editor with a file and Poser connects by itself.", "err");
+        else show("error", explain(e), "err");
+      }
+    }
+    await new Promise(r => setTimeout(r, state === "ok" ? 4000 : 2000));
   }
 })();
 </script>

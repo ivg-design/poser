@@ -2,8 +2,9 @@
 // Runs the panel's rig operations from a terminal against the open Rive editor
 // (same rig.js, same MCP calls), sharing the app's rig manifests.
 //   node tools/poser-cli.mjs list
-//   node tools/poser-cli.mjs bind-joystick --timeline "Timeline 1" --order "L, R, U, D" --rig look --joystick look [--keep-keys] [--selected]
+//   node tools/poser-cli.mjs bind-joystick --timeline "Timeline 1" --order "L, R, U, D" --rig look --joystick look [--script [--lang animascript|luau]] [--keep-keys] [--selected]
 //   node tools/poser-cli.mjs ease --rig look --R 50 --L 50
+//   node tools/poser-cli.mjs backup --rig look
 //   node tools/poser-cli.mjs unbind --rig look
 import fs from "node:fs";
 import os from "node:os";
@@ -65,17 +66,24 @@ if (cmd === "list") {
   const tl = (await rig.timelines()).find(a => a.name === opt("timeline", "Timeline 1"));
   const joy = (await rig.joysticks(ab.id)).find(j => j.name === opt("joystick", "look"));
   if (!tl || !joy) throw new Error("timeline or joystick not found");
-  const m = await rig.bindJoystick({ artboardId: ab.id, artboardName: ab.name, timelineId: tl.id, order: ORDERS[opt("order", "L, R, U, D")],
-    rig: opt("rig", "look"), joystickId: joy.id, removeKeys: !flag("keep-keys"), bias: {}, selectedOnly: flag("selected") });
-  console.log(`bound ${m.tracks.length} properties, ${m.binds.length} binds, ${m.converters.length} converters`);
+  const m = await (flag("script") ? rig.bindJoystickScript : rig.bindJoystick)({ artboardId: ab.id, artboardName: ab.name, timelineId: tl.id, order: ORDERS[opt("order", "L, R, U, D")],
+    rig: opt("rig", "look"), joystickId: joy.id, removeKeys: !flag("keep-keys"), bias: {}, selectedOnly: flag("selected"), language: opt("lang") });
+  console.log(`bound ${m.tracks.length} properties, ${m.binds.length} binds, ${(m.converters || []).length} converters${m.script ? `, script "${m.script}" (${m.scriptLanguage})` : ""}`);
 } else if (cmd === "ease") {
   const m = (await rig.manifests()).find(x => x.rig === opt("rig", "look"));
   await rig.setEaseBias(m, Object.fromEntries(["L", "R", "U", "D"].map(d => [d, +opt(d, 0)])));
   console.log("ease bias set");
+} else if (cmd === "backup") {
+  // write the rig's record into its "poser <rig> dataBkp" script in the open file
+  const m = (await rig.manifests()).find(x => x.rig === opt("rig", "look"));
+  if (!m) throw new Error("no record for that rig");
+  await rig.saveManifest(m);
+  const warn = rig.takeWarning();
+  console.log(warn || `record for ${m.rig} saved in "poser ${m.rig} dataBkp"`);
 } else if (cmd === "unbind") {
   const m = (await rig.manifests()).find(x => x.rig === opt("rig", "look"));
   console.log(await rig.unbind(m));
 } else {
-  console.log("commands: list | bind-joystick | ease | unbind");
+  console.log("commands: list | bind-joystick | ease | backup | unbind");
 }
 console.log(`(${((Date.now() - t0) / 1000).toFixed(1)} s)`);

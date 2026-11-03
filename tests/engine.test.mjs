@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   tracksFrom, sample, poseValues, flatTracks, joystickFormula, sliderFormula, switchFormula,
-  easeCubic, mirrorCubic, factorKeys, mirrorVertices, ORDERS, safeName,
+  easeCubic, mirrorCubic, factorKeys, mirrorVertices, ORDERS, safeName, poseScript,
 } from "../ui/engine.js";
 
 const rows = [
@@ -90,4 +90,15 @@ test("path flip mirrors around the first vertex", () => {
 test("rig names are safe view model property prefixes", () => {
   assert.equal(safeName(" Head look! "), "Head_look");
   assert.equal(safeName(""), "rig");
+});
+
+test("pose script carries origins, per-direction deltas and ease bias", () => {
+  const src = poseScript("look", [{ values: [100, 60, 140, 100, 100] }, { values: [1, 1, 1, 0.25, 1] }], ORDERS["L, R, U, D"], { L: 50, D: -120 });
+  assert.match(src, /export class Poser_look extends Node/);
+  assert.match(src, /const COUNT = 2;/);
+  assert.match(src, /const EASE: StaticArray<f64> = \[50, 0, 0, -100\];/);
+  assert.match(src, /const ORIGIN: StaticArray<f64> = \[100, 1\];/);
+  assert.match(src, /const DL: StaticArray<f64> = \[-40, 0\];/);
+  assert.match(src, /const DR: StaticArray<f64> = \[40, 0\];/);
+  assert.match(src, /const DU: StaticArray<f64> = \[0, -0.75\];/);
 });
