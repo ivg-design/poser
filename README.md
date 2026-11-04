@@ -34,7 +34,7 @@ Key the joystick on any timeline to animate a rig, or bind its x/y to drive it f
 
 | Tab | Does |
 |---|---|
-| Joystick | Bind the poses in a timeline (frames 0–4) to a joystick you added (J). Pick the drive (formula converters, or one AnimaScript) and the frame order: J&S's R, L, U, D or L, R, U, D. Optionally bind only the selection. Set the ease bias per direction. Unbind any rig in the file here: it removes what Poser created and puts the pose keys back. |
+| Joystick | Bind the poses in a timeline (frames 0–4) to a joystick you added (J). Pick the drive (formula converters, or one script) and the frame order: J&S's R, L, U, D or L, R, U, D. Optionally bind only the selection. Set the ease bias per direction. Unbind any rig in the file here: it removes what Poser created and puts the pose keys back. |
 | NumInput | Bind N poses to number inputs (0–100), with optional inverse poses. Connect an input to a joystick axis so you can drag and key it on the canvas. |
 | Toggler | Load the selected items, place each one on the joystick, and bind. |
 | Tools | Key all, Paste origin, Unkey flat, and PathFlipper (mirror a path around its first vertex). |
