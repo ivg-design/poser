@@ -23,7 +23,7 @@
   .tabs button { flex: 1; background: var(--panel); color: var(--dim); border: 1px solid var(--line); }
   .tabs button.on { color: var(--text); border-color: var(--accent); }
   .card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
-  .card h3 { margin: 0; font-size: 11px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+  .card h3 { display: flex; align-items: center; margin: 0; font-size: 11px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
   .row { display: flex; align-items: center; gap: 6px; }
   .row label { flex: 0 0 96px; color: var(--dim); }
   .row > :not(label) { flex: 1; min-width: 0; }
@@ -37,13 +37,22 @@
   }
   button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
   button:disabled { opacity: .45; cursor: default; }
-  .hint { color: var(--dim); font-size: 11px; }
+  .hint { color: var(--dim); font-size: 11px; margin: 0; }
+  .warn { color: var(--err); font-size: 11px; margin: 0; }
+  .help {
+    flex: 0 0 16px; width: 16px; height: 16px; padding: 0; margin-left: auto; border-radius: 50%;
+    background: none; color: var(--dim); font-size: 10px; font-weight: 600; line-height: 1;
+    text-transform: none; letter-spacing: 0;
+  }
+  .help:hover, .help[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+  .row > .help { flex: 0 0 16px; }
   .check { display: flex; align-items: center; gap: 6px; color: var(--dim); }
   .bias { display: grid; grid-template-columns: 18px 1fr 36px; gap: 4px 6px; align-items: center; }
   .bias output { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
   .items { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow: auto; }
   .items .row label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .items input { width: 56px; flex: 0 0 56px; }
+  .stack { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow: auto; }
   #status { padding: 6px 8px; border-radius: 6px; background: var(--panel); color: var(--dim); white-space: pre-wrap; }
   #status.ok { color: var(--ok); } #status.err { color: var(--err); }
   [hidden] { display: none !important; }
@@ -59,8 +68,9 @@
 
   <div class="card">
     <div class="row"><label>Artboard</label><select id="artboard"></select></div>
-    <div class="row"><label>Pose timeline</label><select id="timeline"></select></div>
+    <div class="row" id="timelineRow"><label>Pose timeline</label><select id="timeline"></select></div>
     <div class="row"><button id="refresh">Refresh lists</button></div>
+    <p class="warn" id="unreadable" hidden></p>
   </div>
 
   <div class="tabs">
@@ -83,7 +93,9 @@
       <div class="row"><label>Frame order</label><select id="order"></select></div>
       <div class="row"><label>Joystick</label><select id="joystick"></select></div>
       <div class="row"><label>Rig name</label><input type="text" id="rig" value="look" /></div>
-      <label class="check"><input type="checkbox" id="selectedOnly" /> Only the selection (and everything under it)</label>
+      <p class="hint">Your label for this bind. It prefixes what Poser creates and names the rig under Unbind. It isn't a view model, artboard or timeline.</p>
+      <label class="check"><input type="checkbox" id="selectedOnly" /> Only the selection</label>
+      <p class="hint">Binds only the selected objects and what's nested inside them in the Hierarchy, such as a group's shapes or a path's vertices.</p>
       <label class="check"><input type="checkbox" id="removeKeys" checked /> Remove the pose keys (Unbind restores them)</label>
       <button class="primary" id="bindJoy">Bind to joystick</button>
     </div>
@@ -100,7 +112,7 @@
       <button id="applyEase">Apply ease bias</button>
     </div>
     <div class="card">
-      <h3>Rigs in this file</h3>
+      <h3>Joystick rigs in this file</h3>
       <div class="row"><select id="rigs"></select><button id="unbind" style="flex:0 0 auto">Unbind</button></div>
       <p class="hint">Unbind removes what the panel created and puts the pose keys back. Each rig's record also lives in the file, in the script "poser &lt;rig&gt; dataBkp".</p>
     </div>
@@ -110,34 +122,66 @@
   <section data-pane="sliders" hidden>
     <div class="card">
       <h3>Bind</h3>
-      <p class="hint">The origin goes on frame 0 and one pose on each following frame. Each pose becomes a number input (0–100) in the artboard's view model, and the inputs add together like blend shapes.</p>
-      <div class="row"><label>Poses</label><input type="number" id="poses" min="1" max="64" value="4" /></div>
+      <p class="hint">The origin goes on frame 0 and one pose on each following frame. Each pose reads a number (0–100) in the artboard's view model, and the numbers add together like blend shapes.</p>
+      <div class="row"><label>Drive</label><select id="sliderDrive">
+        <option value="formula">Formula converters</option>
+        <option value="script">One script</option>
+      </select></div>
+      <p class="hint" id="sliderDriveHint"></p>
       <div class="row"><label>Rig name</label><input type="text" id="sliderRig" value="numinput" /></div>
+      <p class="hint">Your label for this bind. It prefixes what Poser creates and names the rig under Unbind. It isn't a view model, artboard or timeline.</p>
+      <div class="stack" id="poseInputs"></div>
+      <div class="row"><button id="addPose">Add pose</button><button id="removePose" hidden>Remove last</button></div>
+      <p class="hint">Pose 1 is frame 1, pose 2 is frame 2, and so on. Each pose makes a new number, or reads one the view model already has (it should run 0–100).</p>
       <label class="check"><input type="checkbox" id="negative" /> Negative values give the inverse pose</label>
       <label class="check"><input type="checkbox" id="sliderSelectedOnly" /> Only the selection</label>
+      <p class="hint">Binds only the selected objects and what's nested inside them in the Hierarchy, such as a group's shapes or a path's vertices.</p>
       <label class="check"><input type="checkbox" id="sliderRemoveKeys" checked /> Remove the pose keys</label>
       <button class="primary" id="bindSliders">Bind to NumInput</button>
     </div>
     <div class="card">
-      <h3>Joystick control</h3>
-      <p class="hint">Drive one input from a joystick axis, so it can be dragged and keyed on the canvas.</p>
-      <div class="row"><label>NumInput rig</label><select id="uiSliderRig"></select></div>
-      <div class="row"><label>Input</label><input type="number" id="uiSlider" min="1" value="1" /></div>
+      <h3>Connect a joystick</h3>
+      <p class="hint">Drag one pose on the canvas with a joystick. Poser puts an empty timeline on the axis, which turns the joystick into a slider. Nothing needs to go in that timeline.</p>
+      <div class="row"><label>Pose</label><select id="uiPose"></select></div>
       <div class="row"><label>Joystick</label><select id="uiJoystick"></select></div>
       <div class="row"><label>Axis</label><select id="uiAxis"><option value="x">x</option><option value="y">y</option></select></div>
       <button id="bindUiSlider">Connect</button>
+      <div class="row" id="connectionRow" hidden><select id="connection"></select><button id="disconnect" style="flex:0 0 auto">Disconnect</button></div>
+    </div>
+    <div class="card">
+      <h3>NumInput rigs in this file</h3>
+      <div class="row"><select id="sliderRigs"></select><button id="unbindSliders" style="flex:0 0 auto">Unbind</button></div>
+      <p class="hint">Unbind removes what Poser created for the rig, its joystick connections included, and puts the pose keys back. Numbers you picked from the view model stay.</p>
     </div>
   </section>
 
   <!-- Toggler -->
   <section data-pane="switch" hidden>
     <div class="card">
-      <h3>Toggler</h3>
-      <p class="hint">Select the swap items (mouths, noses…). Each one gets a spot on the joystick (−1 to 1, y down), and only the item nearest the joystick stays visible.</p>
-      <div class="row"><label>Joystick rig</label><select id="switchRig"></select></div>
+      <h3>Bind</h3>
+      <p class="hint">Only the item nearest the control stays visible. Select the swap items (mouths, noses…), load them, and set where each one sits (−1 to 1, y down).</p>
+      <div class="row"><label>Drive</label><select id="togglerDrive">
+        <option value="formula">Formula converters</option>
+        <option value="script">One script</option>
+      </select></div>
+      <p class="hint" id="togglerDriveHint"></p>
+      <div class="row"><label>Rig name</label><input type="text" id="togglerRig" value="toggler" /></div>
+      <p class="hint">Your label for this bind. It prefixes what Poser creates and names the rig under Unbind. It isn't a view model, artboard or timeline.</p>
+      <div class="row"><label>Joystick</label><select id="switchJoystick"></select></div>
+      <div class="row"><label>Control</label><select id="switchAxes">
+        <option value="xy">Joystick (both axes)</option>
+        <option value="x">Slider (x)</option>
+        <option value="y">Slider (y)</option>
+      </select></div>
+      <p class="hint">Poser puts an empty timeline on each axis the control uses; one axis makes it a slider. A joystick that already drives a Joystick rig is read as it is, on both axes.</p>
       <button id="loadItems">Use selected items</button>
       <div class="items" id="items"></div>
       <button class="primary" id="bindSwitch">Bind toggler</button>
+    </div>
+    <div class="card">
+      <h3>Toggler rigs in this file</h3>
+      <div class="row"><select id="togglerRigs"></select><button id="unbindToggler" style="flex:0 0 auto">Unbind</button></div>
+      <p class="hint">Unbind removes what Poser created for the rig and puts the items back at the opacity they had.</p>
     </div>
   </section>
 
@@ -147,10 +191,11 @@
       <h3>Pose tools</h3>
       <div class="row"><label>Frame</label><input type="number" id="toolFrame" min="0" value="1" /></div>
       <div class="row"><button id="keyAll">Key all</button><button id="pasteOrigin">Paste origin</button></div>
+      <p class="hint">Key all keys every animatable number on the selection. Paste origin copies frame 0 to the frame above.</p>
       <label class="check"><input type="checkbox" id="overwrite" /> Paste over existing keys</label>
       <div class="row"><label>Pose frames</label><input type="number" id="flatPoses" min="1" value="4" /></div>
+      <p class="hint">Unkey flat removes tracks that never change across the pose frames.</p>
       <button id="unkeyFlat">Unkey flat</button>
-      <p class="hint">Key all keys every animatable number on the selection. Paste origin copies frame 0 to the frame above. Unkey flat removes tracks that never change across the pose frames.</p>
     </div>
     <div class="card">
       <h3>PathFlipper</h3>
@@ -164,7 +209,7 @@
 
 <script type="module">
 import { createRig } from "./rig.js";
-import { ORDERS, DIRECTIONS } from "./engine.js";
+import { ORDERS, safeName, itemSpots, sliderInputs } from "./engine.js";
 
 let rpcId = 1;
 async function mcp(tool, args) {
@@ -193,9 +238,10 @@ const status = (msg, kind = "") => { const s = $("status"); s.textContent = msg 
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
 const store = { list: () => invoke("rig_list"), save: (name, json) => invoke("rig_save", { name, json }), remove: name => invoke("rig_remove", { name }) };
 const rig = createRig(mcp, m => status(m), store);
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const fill = (sel, items, label = x => x.name, value = x => x.id) => {
   const keep = sel.value;
-  sel.innerHTML = items.map(x => `<option value="${value(x)}">${label(x)}</option>`).join("");
+  sel.innerHTML = items.map(x => `<option value="${esc(value(x))}">${esc(label(x))}</option>`).join("");
   if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
 };
 fill($("order"), Object.keys(ORDERS).map(name => ({ name, id: name })));
@@ -204,22 +250,87 @@ $("order").value = "L, R, U, D";
 document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => {
   document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
   document.querySelectorAll("section[data-pane]").forEach(p => (p.hidden = p.dataset.pane !== b.dataset.tab));
+  $("timelineRow").hidden = b.dataset.tab === "switch";   // a toggler has no pose timeline
 }));
 document.querySelectorAll(".bias input").forEach(r => r.addEventListener("input", () => (r.nextElementSibling.textContent = r.value)));
+
+// Every explanation folds behind a ? at the end of the element before it, and one shows at a time.
+const hints = [...document.querySelectorAll("p.hint")];
+for (const hint of hints) {
+  const help = document.createElement("button");
+  help.type = "button";
+  help.className = "help";
+  help.textContent = "?";
+  help.setAttribute("aria-label", "What's this?");
+  help.setAttribute("aria-expanded", "false");
+  hint.hidden = true;
+  help.addEventListener("click", e => {
+    e.preventDefault();                       // inside a label, a click must not tick its checkbox
+    const open = hint.hidden;
+    hints.forEach(h => { h.hidden = true; });
+    document.querySelectorAll(".help").forEach(b => b.setAttribute("aria-expanded", "false"));
+    hint.hidden = !open;
+    help.setAttribute("aria-expanded", String(open));
+  });
+  hint.previousElementSibling.appendChild(help);
+}
+
+let rigsNow = [], joysNow = [], numberNames = [];
+let poseCount = 1;
+// one row per pose: a new number, or one the artboard's view model already has
+function drawInputs() {
+  const keep = [...$("poseInputs").querySelectorAll("select")].map(sel => sel.value);
+  const fresh = sliderInputs(safeName($("sliderRig").value), poseCount);
+  const options = numberNames.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  $("poseInputs").innerHTML = fresh.map((name, i) => `<div class="row"><label>Pose ${i + 1}</label><select><option value="">New: ${esc(name)}</option>${options}</select></div>`).join("");
+  $("poseInputs").querySelectorAll("select").forEach((sel, i) => { sel.value = numberNames.includes(keep[i]) ? keep[i] : ""; });
+  $("removePose").hidden = poseCount < 2;
+}
+$("addPose").addEventListener("click", () => { poseCount++; drawInputs(); });
+$("removePose").addEventListener("click", () => { poseCount--; drawInputs(); });
+$("sliderRig").addEventListener("input", drawInputs);
+const joyName = id => joysNow.find(j => j.id === id)?.name || id;
+// a pose's row names its rig and number; two poses reading one number share a row
+const poseLabel = (m, input) => {
+  const inputs = m.poseInputs || m.sliders;
+  return `Pose ${inputs.flatMap((n, i) => (n === input ? [i + 1] : [])).join(", ")} · ${input}`;
+};
+function drawConnections() {
+  const rigs = rigsNow.filter(m => m.kind === "sliders");
+  const keep = $("uiPose").value;
+  // poses with a joystick already are listed under Disconnect instead
+  $("uiPose").innerHTML = rigs.map(m => {
+    const taken = new Set((m.connections || []).map(c => c.slider));
+    const rows = (m.sliders || []).filter(n => !taken.has(n)).map(n => `<option value="${esc(JSON.stringify([m.rig, n]))}">${esc(poseLabel(m, n))}</option>`);
+    return rows.length ? `<optgroup label="${esc(m.rig)}">${rows.join("")}</optgroup>` : "";
+  }).join("");
+  if ([...$("uiPose").options].some(o => o.value === keep)) $("uiPose").value = keep;
+  const cs = rigs.flatMap(m => (m.connections || []).map(c => ({ name: `${m.rig} · ${poseLabel(m, c.slider)} ← ${joyName(c.joystickId)} ${c.axis}`, id: JSON.stringify([m.rig, c.slider]) })));
+  fill($("connection"), cs);
+  $("connectionRow").hidden = !cs.length;
+}
 
 async function refresh() {
   const { list, active } = await rig.artboards();
   fill($("artboard"), list);
   if (active && !$("artboard").dataset.touched) $("artboard").value = active;
-  fill($("timeline"), await rig.timelines());
-  const joys = await rig.joysticks($("artboard").value);
-  fill($("joystick"), joys); fill($("uiJoystick"), joys);
-  const ms = await rig.manifests();
-  const joyRigs = ms.filter(m => m.kind === "joystick").map(m => ({ name: m.rig, id: m.rig }));
-  fill($("easeRig"), joyRigs);
-  fill($("switchRig"), ms.filter(m => m.kind === "joystick" && m.drive !== "script").map(m => ({ name: m.rig, id: m.rig })));
-  fill($("uiSliderRig"), ms.filter(m => m.kind === "sliders").map(m => ({ name: m.rig, id: m.rig })));
-  fill($("rigs"), ms.map(m => ({ name: `${m.rig} · ${m.kind} · ${m.tracks.length} props`, id: m.rig })));
+  const ms = rigsNow = await rig.manifests();
+  // the timelines Poser made hold no poses, so they aren't offered as pose timelines
+  const own = new Set(ms.flatMap(m => [...Object.values(m.timelines || {}), ...(m.connections || []).map(c => c.timeline)]));
+  fill($("timeline"), (await rig.timelines()).filter(t => !own.has(t.id)));
+  const joys = joysNow = await rig.joysticks($("artboard").value);
+  fill($("joystick"), joys); fill($("uiJoystick"), joys); fill($("switchJoystick"), joys);
+  numberNames = await rig.numbers($("artboard").value, ms);
+  drawInputs();
+  const lost = rig.unreadableRecords();
+  $("unreadable").hidden = !lost.length;
+  $("unreadable").textContent = lost.map(n => `The record "poser ${n} dataBkp" is empty or damaged, so Poser can't list or unbind the rig "${n}".`).join(" ");
+  const names = kind => ms.filter(m => m.kind === kind).map(m => ({ name: m.rig, id: m.rig }));
+  fill($("easeRig"), names("joystick"));
+  fill($("rigs"), ms.filter(m => m.kind === "joystick").map(m => ({ name: `${m.rig} · ${m.tracks.length} props`, id: m.rig })));
+  fill($("sliderRigs"), ms.filter(m => m.kind === "sliders").map(m => ({ name: `${m.rig} · ${m.tracks.length} props`, id: m.rig })));
+  fill($("togglerRigs"), ms.filter(m => m.kind === "toggler").map(m => ({ name: `${m.rig} · ${m.items.length} items`, id: m.rig })));
+  drawConnections();
   const em = ms.find(m => m.rig === $("easeRig").value);
   if (em) document.querySelectorAll(".bias input").forEach(r => { r.value = em.bias?.[r.dataset.dir] || 0; r.nextElementSibling.textContent = r.value; });
 }
@@ -245,17 +356,17 @@ function action(id, fn) {
 const abName = () => $("artboard").selectedOptions[0]?.textContent;
 
 action("refresh", async () => { await refresh(); return "Lists refreshed."; });
-const DRIVE_HINTS = {
-  formula: "Each pose is baked into one formula converter per property. No script runs.",
-  script: () => `One script computes every posed value, with no converters. Poser creates the Node script "poser ${$("rig").value.trim() || "look"}" and places it; a file with no placed script yet needs it dragged onto the artboard once. Luau files only: the editor can't make Node scripts in an AnimaScript file.`,
-};
-function driveHint() {
-  const h = DRIVE_HINTS[$("drive").value];
-  $("driveHint").textContent = typeof h === "function" ? h() : h;
+function driveHint(drive, rigField, formula) {
+  const show = () => { $(`${drive}Hint`).textContent = $(drive).value === "script"
+    ? `One script computes every value, with no converters. Poser creates the Node script "poser ${$(rigField).value.trim() || "rig"}" and places it; a file with no placed script yet needs it dragged onto the artboard once. Luau files only: the editor can't make Node scripts in an AnimaScript file.`
+    : formula; };
+  $(drive).addEventListener("change", show);
+  $(rigField).addEventListener("input", show);
+  show();
 }
-$("drive").addEventListener("change", driveHint);
-$("rig").addEventListener("input", driveHint);
-driveHint();
+driveHint("drive", "rig", "Each pose is baked into one formula converter per property. No script runs.");
+driveHint("sliderDrive", "sliderRig", "Each pose is baked into one formula converter per property. No script runs.");
+driveHint("togglerDrive", "togglerRig", "Each item gets one formula converter on its opacity. No script runs.");
 
 action("bindJoy", async () => {
   if (!$("joystick").value) throw new Error("Add a joystick to the artboard first (J), then refresh.");
@@ -274,39 +385,53 @@ action("applyEase", async () => {
 });
 action("bindSliders", async () => {
   const m = await rig.bindSliders({ artboardId: $("artboard").value, artboardName: abName(), timelineId: $("timeline").value,
-    rig: $("sliderRig").value, poses: +$("poses").value, allowNegative: $("negative").checked,
+    rig: $("sliderRig").value, drive: $("sliderDrive").value, poses: poseCount,
+    inputs: [...$("poseInputs").querySelectorAll("select")].map(sel => sel.value), allowNegative: $("negative").checked,
     removeKeys: $("sliderRemoveKeys").checked, selectedOnly: $("sliderSelectedOnly").checked });
-  return `Bound ${m.tracks.length} properties to ${m.sliders.length} inputs.`;
+  return `Bound ${m.tracks.length} properties to ${m.sliders.length} inputs${m.drive === "script" ? ` through the "${m.script}" script` : ""}.${m.note ? " " + m.note : ""}`;
 });
 action("bindUiSlider", async () => {
-  const m = (await rig.manifests()).find(x => x.rig === $("uiSliderRig").value);
-  if (!m) throw new Error("Bind a NumInput rig first.");
-  await rig.bindJoystickToSlider({ sliderRig: m.rig, slider: `${m.rig}_s${$("uiSlider").value}`, joystickId: $("uiJoystick").value,
-    axis: $("uiAxis").value, allowNegative: $("negative").checked });
-  return "Input connected to the joystick.";
+  if (!$("uiPose").value) throw new Error(rigsNow.some(m => m.kind === "sliders") ? "Every pose already has a joystick." : "Bind a NumInput rig first.");
+  if (!$("uiJoystick").value) throw new Error("Add a joystick to the artboard first (J), then refresh.");
+  const [sliderRig, slider] = JSON.parse($("uiPose").value);
+  const label = $("uiPose").selectedOptions[0].textContent;
+  await rig.bindJoystickToSlider({ sliderRig, slider, joystickId: $("uiJoystick").value, axis: $("uiAxis").value, allowNegative: $("negative").checked });
+  return `${label} connected: the joystick is a slider on ${$("uiAxis").value} now.`;
+});
+action("disconnect", async () => {
+  const [sliderRig, slider] = JSON.parse($("connection").value);
+  const m = (await rig.manifests()).find(x => x.kind === "sliders" && x.rig === sliderRig);
+  if (!m) throw new Error("Nothing to disconnect.");
+  const r = await rig.disconnectSlider(m, slider);
+  return `${poseLabel(m, slider)} disconnected.${r.left ? " The editor still lists the removed bind: reload the file (Cmd+R) before binding this joystick again." : ""}${r.kept ? ` The timeline "${r.kept}" has keys, so it stays and the joystick stays a slider. Delete it yourself if you don't need them.` : ""}`;
 });
 
 let switchItems = [];
 function drawItems() {
-  $("items").innerHTML = switchItems.map((it, i) => `<div class="row"><label title="${it.name}">${it.name}</label>
-    <input type="number" step="0.1" min="-1" max="1" value="${it.x}" data-i="${i}" data-k="x" />
-    <input type="number" step="0.1" min="-1" max="1" value="${it.y}" data-i="${i}" data-k="y" /></div>`).join("");
+  const axes = [...$("switchAxes").value];
+  $("items").innerHTML = switchItems.map((it, i) => `<div class="row"><label title="${esc(it.name)}">${esc(it.name)}</label>${axes.map(k =>
+    `<input type="number" step="0.1" min="-1" max="1" value="${it[k]}" title="${k}" data-i="${i}" data-k="${k}" />`).join("")}</div>`).join("");
   $("items").querySelectorAll("input").forEach(inp => inp.addEventListener("change", () => (switchItems[+inp.dataset.i][inp.dataset.k] = +inp.value)));
 }
+function layoutItems() {
+  const spots = itemSpots(switchItems.length, $("switchAxes").value);
+  switchItems = switchItems.map((it, i) => ({ ...it, ...spots[i] }));
+  drawItems();
+}
+$("switchAxes").addEventListener("change", layoutItems);
 action("loadItems", async () => {
   const sel = await rig.selection();
   if (sel.length < 2) throw new Error("Select at least two items.");
-  switchItems = sel.map((o, i) => {          // start them on a ring; edit the spots below
-    const a = -Math.PI / 2 + (2 * Math.PI * i) / sel.length;
-    return { id: o.id, name: o.name || o.id, x: +Math.cos(a).toFixed(2), y: +Math.sin(a).toFixed(2) };
-  });
-  drawItems();
+  switchItems = sel.map(o => ({ id: o.id, name: o.name || o.id }));
+  layoutItems();
   return `${sel.length} items loaded.`;
 });
 action("bindSwitch", async () => {
   if (switchItems.length < 2) throw new Error("Load at least two items.");
-  await rig.bindSwitch({ joystickRig: $("switchRig").value, items: switchItems });
-  return `Toggler bound to ${switchItems.length} items.`;
+  if (!$("switchJoystick").value) throw new Error("Add a joystick to the artboard first (J), then refresh.");
+  const m = await rig.bindToggler({ artboardId: $("artboard").value, artboardName: abName(), rig: $("togglerRig").value, drive: $("togglerDrive").value,
+    joystickId: $("switchJoystick").value, axes: $("switchAxes").value, items: switchItems });
+  return `Toggler bound to ${switchItems.length} items${m.source ? `, reading the joystick of "${m.source}"` : ""}${m.drive === "script" ? ` through the "${m.script}" script` : ""}.${m.note ? " " + m.note : ""}`;
 });
 
 action("keyAll", async () => `Keyed ${await rig.keyAll({ timelineId: $("timeline").value, frame: +$("toolFrame").value })} properties.`);
@@ -314,13 +439,21 @@ action("pasteOrigin", async () => `Pasted ${await rig.pasteOrigin({ timelineId: 
 action("unkeyFlat", async () => `Removed ${await rig.unkeyFlat({ timelineId: $("timeline").value, poses: +$("flatPoses").value })} flat tracks.`);
 action("flipH", async () => `Flipped ${await rig.pathFlip({ vertical: false })} vertices.`);
 action("flipV", async () => `Flipped ${await rig.pathFlip({ vertical: true })} vertices.`);
-action("unbind", async () => {
-  const m = (await rig.manifests()).find(x => x.rig === $("rigs").value);
-  if (!m) throw new Error("Nothing to unbind.");
-  const r = await rig.unbind(m);
-  return `Unbound ${m.rig}: ${r.binds} binds removed, ${r.restored} tracks restored${r.leftovers ? `, ${r.leftovers} objects to delete by hand` : ""}${r.left ? `. The editor still lists ${r.left} of the removed binds: reload the file (Cmd+R) before binding these objects or this joystick again` : ""}.`
-    + (m.drive === "script" ? ` The "${m.script}" script is still on the artboard: delete it there.` : "");
-});
+function unbindButton(button, select) {
+  action(button, async () => {
+    const m = (await rig.manifests()).find(x => x.rig === $(select).value);
+    if (!m) throw new Error("Nothing to unbind.");
+    const r = await rig.unbind(m);
+    const back = m.kind === "toggler" ? `${m.items.length} items restored` : `${r.restored} tracks restored`;
+    return `Unbound ${m.rig}: ${r.binds} binds removed, ${back}${r.leftovers ? `, ${r.leftovers} objects to delete by hand` : ""}${r.left ? `. The editor still lists ${r.left} of the removed binds: reload the file (Cmd+R) before binding these objects or this joystick again` : ""}.`
+      + (r.recreated ? ` The pose timeline was gone, so Poser made it again as "${r.recreated}".` : "")
+      + (r.keptTimelines.length ? ` ${r.keptTimelines.map(n => `"${n}"`).join(", ")} ${r.keptTimelines.length > 1 ? "have" : "has"} keys, so ${r.keptTimelines.length > 1 ? "they stay" : "it stays"} and the joystick stays a slider. Delete ${r.keptTimelines.length > 1 ? "them" : "it"} yourself if you don't need the keys.` : "")
+      + (m.drive === "script" && !m.made?.placement ? ` The "${m.script}" script is still on the artboard: delete it there.` : "");
+  });
+}
+unbindButton("unbind", "rigs");
+unbindButton("unbindSliders", "sliderRigs");
+unbindButton("unbindToggler", "togglerRigs");
 
 // the window is exactly as tall as what it shows, so it never scrolls or leaves empty space
 const fitWindow = (() => {

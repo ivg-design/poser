@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   tracksFrom, sample, poseValues, flatTracks, joystickFormula, sliderFormula, switchFormula,
   easeCubic, mirrorCubic, factorKeys, mirrorVertices, ORDERS, safeName, poseScript,
+  sliderInputs, axisFormula, axisRest, connectionTimeline, itemSpots, numInputScriptLuau, togglerScriptLuau,
 } from "../ui/engine.js";
 
 const rows = [
@@ -103,4 +104,57 @@ test("pose script carries origins, per-direction deltas and ease bias", () => {
   assert.match(src, /const DL: StaticArray<f64> = \[-40, 0\];/);
   assert.match(src, /const DR: StaticArray<f64> = \[40, 0\];/);
   assert.match(src, /const DU: StaticArray<f64> = \[0, -0.75\];/);
+});
+
+test("slider formula reads the picked inputs, and a blank pick makes a new number", () => {
+  assert.deepEqual(sliderInputs("n", 3, ["open", "", undefined]), ["open", "n_s2", "n_s3"]);
+  const f = sliderFormula("V", "n", [0, 10, 20], true, ["open", "n_s2"]);
+  assert.match(f, /\{\{V\/open\}\}/);
+  assert.match(f, /\{\{V\/n_s2\}\}/);
+  assert.match(sliderFormula("V", "n", [0, 10], false), /\{\{V\/n_s1\}\}/);
+});
+
+test("a slider's whole travel is 0 to 100; with negatives the centre is 0", () => {
+  const run = (f, x) => Function("Input", `return ${f.replace("{Input}", "Input")}`)(x);
+  assert.equal(run(axisFormula(false), axisRest(false)), 0);
+  assert.equal(run(axisFormula(false), 1), 100);
+  assert.equal(run(axisFormula(true), axisRest(true)), 0);
+  assert.equal(run(axisFormula(true), -1), -100);
+});
+
+test("connection timelines are named after the rig and input", () => {
+  assert.equal(connectionTimeline("num", "num_s1"), "num s1");
+  assert.equal(connectionTimeline("num", "openness"), "num openness");
+});
+
+test("toggler spots: a ring on both axes, a line on one", () => {
+  assert.deepEqual(itemSpots(3, "x").map(s => s.x), [-1, 0, 1]);
+  assert.ok(itemSpots(3, "x").every(s => s.y === 0));
+  assert.deepEqual(itemSpots(2, "y").map(s => s.y), [-1, 1]);
+  const ring = itemSpots(4, "xy");
+  assert.deepEqual([ring[0].x, ring[0].y], [0, -1]);
+});
+
+test("a one-axis toggler formula reads only that axis and picks the nearest", () => {
+  const items = [{ x: -1, y: 0 }, { x: 0, y: 0 }, { x: 1, y: 0 }];
+  const pos = { x: "t_x", y: null };
+  const f = i => switchFormula("V", "t", items, i, pos);
+  assert.ok(!/t_y/.test(f(0)));
+  const run = (i, x) => Function("x", "pow", "min", "max", "ceil",
+    `return ${f(i).replaceAll("{{V/t_x}}", "x")}`)(x, Math.pow, Math.min, Math.max, Math.ceil);
+  assert.deepEqual([run(0, 0.9), run(1, 0.9), run(2, 0.9)], [0, 0, 1]);
+  assert.deepEqual([run(0, -0.1), run(1, -0.1), run(2, -0.1)], [0, 1, 0]);
+});
+
+test("NumInput and Toggler scripts carry their inputs and values, with no --!strict", () => {
+  const n = numInputScriptLuau("num", ["openness", "num_s2"], [{ values: [1, 11, 21] }, { values: [2, 2, 5] }], false);
+  assert.match(n, /local INPUTS = \{ "openness", "num_s2" \}/);
+  assert.match(n, /local ORIGIN = \{ 1, 2 \}/);
+  assert.match(n, /\{ 10, 0 \},\n  \{ 20, 3 \},/);
+  assert.match(n, /math\.max\(0, input\(self, j\)\)/);
+  assert.ok(!numInputScriptLuau("num", ["a"], [{ values: [0, 1] }], true).includes("math.max"));
+  const t = togglerScriptLuau("t", [{ x: -1, y: 0 }, { x: 1, y: 0 }], { x: "t_x", y: null });
+  assert.match(t, /local INPUTS = \{ "t_x" \}/);
+  assert.match(t, /\{ -1, 1 \},/);
+  assert.ok(![n, t].some(s => s.includes("--!strict")));
 });

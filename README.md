@@ -23,10 +23,14 @@ value = origin + (left − origin)·fL + (right − origin)·fR + (up − origin
   position also lands in `<rig>_x/_y`.
 - **Ease bias.** Each direction's curve is the keyframe curve on its factor timeline: −100 eases in,
   +100 eases out, 0 is linear. You can also shape the curves yourself in the graph editor.
-- **NumInput.** One view-model number per pose (`<rig>_s1…sN`, 0 to 100), added together like blend
-  shapes. Optionally a negative value gives the inverse pose.
-- **Toggler.** Swap items get a spot on the joystick (−1 to 1). Only the item nearest the joystick
-  stays visible (its opacity is bound to a formula).
+- **NumInput.** One view-model number per pose, 0 to 100, added together like blend shapes. Each
+  pose makes a new number (`<rig>_s1…sN`) or reads one the view model already has. Optionally a
+  negative value gives the inverse pose.
+- **Toggler.** Swap items get a spot on a control (−1 to 1), which is a joystick or a one-axis
+  slider. Only the item nearest the control stays visible.
+
+A **rig name** is your label for one bind. It prefixes what Poser creates and names the rig under
+Unbind. It isn't a view model, artboard or timeline. Names are unique across the three kinds of rig.
 
 Key the joystick on any timeline to animate a rig, or bind its x/y to drive it from data.
 
@@ -35,8 +39,8 @@ Key the joystick on any timeline to animate a rig, or bind its x/y to drive it f
 | Tab | Does |
 |---|---|
 | Joystick | Bind the poses in a timeline (frames 0–4) to a joystick you added (J). Pick the drive (formula converters, or one script) and the frame order: J&S's R, L, U, D or L, R, U, D. Optionally bind only the selection. Set the ease bias per direction. Unbind any rig in the file here: it removes what Poser created and puts the pose keys back. |
-| NumInput | Bind N poses to number inputs (0–100), with optional inverse poses. Connect an input to a joystick axis so you can drag and key it on the canvas. |
-| Toggler | Load the selected items, place each one on the joystick, and bind. |
+| NumInput | Add as many poses as the timeline holds and bind them to number inputs (0–100), new or existing, with formula converters or one script and optional inverse poses. Connect a pose to a joystick axis so you can drag and key it on the canvas: Poser puts an empty timeline (`<rig> <input>`) on that axis, which turns the joystick into a slider. Disconnect or Unbind on the same tab. |
+| Toggler | Pick the drive and a joystick, choose both axes or a one-axis slider, load the selected items, place them and bind. A free joystick becomes the rig's own control. A joystick that already drives a formula Joystick rig is read as it is. Unbind on the same tab puts the items back at the opacity they had. |
 | Tools | Key all, Paste origin, Unkey flat, and PathFlipper (mirror a path around its first vertex). |
 
 Each bind writes a manifest of what it created, as JSON in the app data folder
@@ -68,10 +72,15 @@ node tools/poser-cli.mjs list
 
 - **The Rive editor**, running with the file open. Its MCP server is at `127.0.0.1:9791`.
 - **Joysticks:** the MCP cannot create one, so add it yourself (J) and pick it in the panel.
+- **Keyed joystick timelines:** the timeline Poser puts on a joystick's axis starts empty. If it has
+  keys by Unbind or Disconnect, it stays and the joystick stays a slider until you delete it.
+- **Empty pose timelines:** "Remove the pose keys" can leave the pose timeline empty, and you can
+  delete it. Unbind makes it again with its name and settings and puts the keys back. If another
+  timeline has taken the name, the new one is called `<name> restored`.
 - **Script drive:** Poser creates the `poser <rig>` Node script in the file's language: the file's
   script engine (the backboard's `scriptingVm`, key 472) decides, since a script in the other
   language never becomes a Node. In a file whose engine is wasm (AnimaScript) the editor can't make
-  a Node script at all, so use the formula drive there. Don't push a project with `scripting: wasm`
+  a Node script at all, so use the formula drive there. NumInput and Toggler scripts are Luau only. Don't push a project with `scripting: wasm`
   to a file that has Luau scripts: the editor can't switch the engine back (only another CLI push
   can). The MCP cannot place a script on an artboard, so
   Poser copies a placement that already exists in the file and points it at the script; a file

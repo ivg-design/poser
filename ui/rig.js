@@ -48,6 +48,13 @@ export function createRig(mcp, log = () => {}, store) {
     return scope;
   }
 
+  // no selection must not fall back to the whole timeline
+  async function bindScope() {
+    const scope = await selectedScope();
+    if (!scope) throw new Error('"Only the selection" is on, but nothing is selected in the editor.');
+    return scope;
+  }
+
   async function poseTracks(timelineId, scope) {
     const r = await mcp("animation_editor", { command: "queryKeyFrames", data: { queryKeyFrames: { animationIds: [timelineId] } } });
     const tracks = E.tracksFrom(r.keyframes?.[timelineId] || []);
@@ -237,10 +244,11 @@ export function createRig(mcp, log = () => {}, store) {
   // the app's copy always lands; trouble with the in-file copy is a warning, not a failed bind
   let warning = "";
   const takeWarning = () => { const w = warning; warning = ""; return w; };
+  const warn = text => { warning = [warning, text].filter(Boolean).join(" "); };
   async function saveManifest(m) {
     m.savedAt = Date.now();
     await store.save(manifestName(m), JSON.stringify(m));
-    try { await saveRecordScript(m); } catch (e) { warning = String(e.message || e); }
+    try { await saveRecordScript(m); } catch (e) { warn(String(e.message || e)); }
   }
   async function saveRecordScript(m) {
     const name = recordName(m.rig);
@@ -259,16 +267,21 @@ export function createRig(mcp, log = () => {}, store) {
 
   // the newer of the two copies wins (the in-file one when neither carries a save time),
   // so a failed in-file write never brings back an older record
+  let unreadable = [];
   async function manifests() {
     const file = await fileKey();
     const byRig = new Map((await store.list()).map(j => JSON.parse(j)).filter(m => m.file === file).map(m => [m.rig, m]));
+    unreadable = [];
     for (const a of await recordAssets()) {
       let m = null;
       try { m = parseRecord(await readScript(a.name)); } catch {}
-      if (m?.rig && (m.savedAt || 0) >= (byRig.get(m.rig)?.savedAt || 0)) byRig.set(m.rig, { ...m, file });
+      if (!m?.rig) { const name = a.name.match(RECORD)[1]; if (!byRig.has(name)) unreadable.push(name); continue; }
+      if ((m.savedAt || 0) >= (byRig.get(m.rig)?.savedAt || 0)) byRig.set(m.rig, { ...m, file });
     }
     return [...byRig.values()];
   }
+  // rigs whose record script is in the file but holds nothing Poser can read, with no copy in the app
+  const unreadableRecords = () => unreadable;
 
   async function dropManifest(m) {
     await store.remove(manifestName(m));
@@ -276,13 +289,16 @@ export function createRig(mcp, log = () => {}, store) {
     if (asset) await mcp("delete_objects", { objectIds: [asset.id] });
   }
 
+  const KIND_NAME = { joystick: "Joystick", sliders: "NumInput", toggler: "Toggler" };
+
   // a rigged timeline's pose keys live in its manifest, so binding it again finds nothing:
   // the same rig name rebinds (unbind restores the keys first), another rig name is refused
-  async function claim(file, timelineId, rig) {
+  async function claim(file, timelineId, rig, kind) {
     const ms = (await store.list()).map(j => JSON.parse(j)).filter(m => m.file === file);
-    const other = ms.find(m => m.rig !== rig && m.timelineId === timelineId);
-    if (other) throw new Error(`That timeline is already rigged as "${other.rig}". Use rig name "${other.rig}" to rebind it, or unbind it in Tools.`);
+    const other = timelineId && ms.find(m => m.rig !== rig && m.timelineId === timelineId);
+    if (other) throw new Error(`That timeline is already rigged as "${other.rig}". Use rig name "${other.rig}" to rebind it, or unbind it on its tab.`);
     const same = ms.find(m => m.rig === rig);
+    if (same && same.kind !== kind) throw new Error(`The name "${rig}" is taken by a ${KIND_NAME[same.kind] || same.kind} rig. Use another rig name, or unbind that rig on its tab.`);
     if (same) {
       log(`Rig "${rig}" exists: unbinding it first.`);
       const r = await unbind(same);
@@ -296,12 +312,100 @@ export function createRig(mcp, log = () => {}, store) {
     for (const m of await manifests()) {
       if (m.kind === "joystick" && m.rig !== rig && m.joystickId === joystickId)
         throw new Error(`That joystick already drives the rig "${m.rig}". Unbind it first, or add another joystick (J).`);
+      if (m.kind === "toggler" && m.rig !== rig && !m.source && m.joystickId === joystickId)
+        throw new Error(`That joystick already drives the toggler "${m.rig}". Unbind it first, or add another joystick (J).`);
       const c = (m.connections || []).find(c => c.joystickId === joystickId && axes.includes(c.axis));
       if (c) throw new Error(`That joystick's ${c.axis} already drives ${c.slider} of the NumInput rig "${m.rig}". Unbind that rig first, or add another joystick (J).`);
     }
     const keys = axes.map(a => (a === "x" ? 299 : 300));
     const live = (await allBinds()).filter(d => d.objectId === joystickId && keys.includes(d.propertyKey));
     if (live.length) throw boundError(live, "add another joystick (J)");
+  }
+
+  const AXIS = { x: { value: 299, timeline: 301 }, y: { value: 300, timeline: 302 } };
+
+  // A timeline with nothing in it. On a joystick's axis it makes the handle move along that axis
+  // only, which is what turns the joystick into a slider. Timelines belong to the active artboard.
+  // The MCP refuses 0-0 on a joystick's axis, so an axis is cleared by deleting its timeline, and
+  // every axis needs a timeline of its own.
+  async function createTimeline(name, artboardId, duration, ifTaken) {
+    if ((await artboards()).active !== artboardId)
+      await mcp("open_file_editor", { command: "focusArtboard", data: { focusArtboard: { artboardId } } });
+    const have = new Set((await timelines()).map(t => t.name));
+    const final = have.has(name) ? ifTaken : name;
+    const made = (await mcp("animation_editor", { command: "createLinearAnimations", data: { createLinearAnimations: {
+      linearAnimations: [{ name: final, duration }] } } })).animations || [];
+    const id = made.find(a => a.name === final)?.id;
+    if (!id) throw new Error(`Timeline "${final}" was not created.`);
+    return { id, name: final };
+  }
+  const emptyTimeline = async (name, artboardId) => (await createTimeline(name, artboardId, 1, `poser ${name}`)).id;
+
+  // The timelines Poser puts on a joystick's axes start empty. One that has keys now holds someone's
+  // work, so it stays. If the check fails, nothing is deleted.
+  async function keyedTimelines(ids) {
+    if (!ids.length) return new Set();
+    try {
+      const r = await mcp("animation_editor", { command: "queryKeyFrames", data: { queryKeyFrames: { animationIds: ids } } });
+      return new Set(ids.filter(id => (r.keyframes?.[id] || []).length));
+    } catch { return new Set(ids); }
+  }
+
+  // Binding with "Remove the pose keys" can leave the pose timeline empty, and you may delete it.
+  // So a rig records what it takes to make that timeline again: its name, and its fps (56),
+  // length in frames (57), speed (58) and loop (59).
+  const TIMELINE_KEYS = [56, 57, 58, 59];
+  async function timelineInfo(timelineId) {
+    const timelineName = (await timelines()).find(t => t.id === timelineId)?.name;
+    const timelineProps = (await mcp("query_property_values", { propertyKeys: { [timelineId]: TIMELINE_KEYS } })).values?.[timelineId] || {};
+    return { timelineName, timelineProps };
+  }
+
+  // The timeline Unbind puts the pose keys back on: the original if it's still there, otherwise a
+  // new one with its name and settings. A different timeline that took the name is left alone.
+  async function poseTimeline(m) {
+    const alive = (await mcp("query_objects", { objectIds: [m.timelineId], depth: 0 })).objects || [];
+    if (alive.some(o => o.id === m.timelineId)) return { id: m.timelineId };
+    const name = m.timelineName || `${m.rig} poses`;
+    const props = m.timelineProps || {};
+    const lastKey = Math.max(0, ...m.tracks.flatMap(t => t.keys.map(k => k.frame)));
+    const frames = Math.max(props[57] || 0, lastKey + 1);
+    const made = await createTimeline(name, m.artboardId, frames / (props[56] || 60), `${name} restored`);
+    const settings = Object.fromEntries(TIMELINE_KEYS.filter(k => props[k] !== undefined).map(k => [k, k === 57 ? frames : props[k]]));
+    if (Object.keys(settings).length) await mcp("set_property_values", { propertyValues: { [made.id]: settings } }).catch(() => {});
+    log(`The timeline "${name}" was gone, so Poser made it again as "${made.name}".`);
+    return { id: made.id, recreated: made.name };
+  }
+
+  // The artboard's view-model numbers a rig can read. Numbers Poser added go when their rig goes,
+  // so they aren't offered.
+  async function numbers(artboardId, ms) {
+    const q = await mcp("query_property_values", { propertyKeys: { [artboardId]: [583] } });
+    const vm = (await listVMs()).find(v => v.id === q.values?.[artboardId]?.["583"]);
+    if (!vm) return [];
+    const poser = new Set((ms || await manifests()).flatMap(m => m.addedProps || []));
+    return (vm.viewModelProperties || []).filter(p => p.propertyType === "number" && !poser.has(p.name)).map(p => p.name);
+  }
+
+  // NumInput and Toggler write their rig script in Luau, the only language the editor can make a Node in
+  async function luauScript(rig, artboardId) {
+    const script = await ensureScript(rig, artboardId);
+    if (script.language !== "luau") throw new Error("This file runs AnimaScript, and Poser writes NumInput and Toggler scripts in Luau. Use the formula drive.");
+    return script;
+  }
+
+  // a curve the editor didn't report can't come back from Unbind, so say so while the keys are removed
+  function warnCurves(rows) {
+    const n = E.unreadCurves(rows.map(r => r.t));
+    if (n) warn(`${n} pose key${n > 1 ? "s have curves" : " has a curve"} Poser couldn't read. Unbind will restore ${n > 1 ? "them" : "it"} without ${n > 1 ? "those curves" : "that curve"}.`);
+  }
+
+  // A refused bind should make nothing. A rig of this name gets its keys back when claim() unbinds
+  // it, so an empty timeline can only be refused when there's no such rig.
+  async function checkPoses(file, rig, timelineId, scope, isPosed) {
+    if ((await store.list()).map(j => JSON.parse(j)).some(m => m.file === file && m.rig === rig)) return;
+    const tracks = await poseTracks(timelineId, scope);
+    if (![...tracks.values()].some(isPosed)) throw noChanges(tracks, scope);
   }
 
   function noChanges(tracks, scope) {
@@ -316,9 +420,9 @@ export function createRig(mcp, log = () => {}, store) {
   async function bindJoystick({ artboardId, artboardName, timelineId, order, rig, joystickId, removeKeys, bias, selectedOnly }) {
     rig = E.safeName(rig);
     const file = await fileKey();
-    await claim(file, timelineId, rig);
+    const scope = selectedOnly ? await bindScope() : null;   // before anything can change the selection
+    await claim(file, timelineId, rig, "joystick");
     await joystickFree(joystickId, ["x", "y"], rig);
-    const scope = selectedOnly ? await selectedScope() : null;
     const tracks = await poseTracks(timelineId, scope);
     const frames = [0, 1, 2, 3, 4];
     const rows = [];
@@ -367,12 +471,13 @@ export function createRig(mcp, log = () => {}, store) {
     const propBinds = await bind(vm.id, rows.map((r, i) => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, viewModelPropertyId: ids[`${rig}_fR`], converterId: convIds[i] })), artboardId);
 
     const manifest = {
-      kind: "joystick", version: 1, file, rig, artboardId, timelineId, order, joystickId, vmId: vm.id, addedProps: added,
+      kind: "joystick", version: 1, file, rig, artboardId, timelineId, ...await timelineInfo(timelineId), order, joystickId, vmId: vm.id, addedProps: added,
       groupId: group.id, nodes, timelines: tl, converters: convIds, bias, binds: [...controlBinds, ...propBinds],
       tracks: rows.map(r => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, propertyName: r.t.propertyName,
-        keys: r.t.keys.map(k => ({ frame: k.frame, value: k.value, interpolationType: k.interpolationType })) })),
+        keys: E.savedKeys(r.t) })),
     };
     if (removeKeys) {
+      warnCurves(rows);
       const ids = rows.flatMap(r => r.t.keys.map(k => k.keyframeId));
       for (const part of chunks(ids, 400)) {
         await mcp("animation_editor", { command: "modifyKeyFrames", data: { modifyKeyFrames: { animationId: timelineId, delete: part } } });
@@ -499,15 +604,15 @@ export function createRig(mcp, log = () => {}, store) {
   const listInstances = async viewModelId => (await mcp("viewmodel_editor", { command: "listViewModelInstances",
     data: { listViewModelInstances: { viewModelId } } })).instances || [];
 
-  // `poser <rig>` view model (x, y, p0…pN) with a Default instance, nested in the artboard's view
+  // `poser <rig>` view model (the control numbers, then p0…pN) with a Default instance, nested in the artboard's view
   // model as `<rig>`, and every instance of the artboard's view model pointed at it
-  async function poseViewModel(vm, rig, origins) {
+  async function poseViewModel(vm, rig, origins, controls = ["x", "y"]) {
     const name = E.scriptVmName(rig);
     // a failed bind can leave these behind; a bound rig was already removed by claim()
     const stale = (await listVMs()).filter(v => v.name === name).map(v => v.id);
     const staleProp = (vm.viewModelProperties || []).filter(p => p.name === rig && p.propertyType === "viewModel").map(p => p.id);
     if (stale.length || staleProp.length) await mcp("delete_objects", { objectIds: [...staleProp, ...stale] });
-    const props = ["x", "y", ...origins.map((_, i) => `p${i}`)];
+    const props = [...controls, ...origins.map((_, i) => `p${i}`)];
     await mcp("viewmodel_editor", { command: "createViewModels", data: { createViewModels: { viewModels: [
       { name, viewModelProperties: props.map(n => ({ name: n, propertyType: "number" })) }] } } });
     const poses = (await listVMs()).find(v => v.name === name);
@@ -535,11 +640,13 @@ export function createRig(mcp, log = () => {}, store) {
   async function bindJoystickScript({ artboardId, artboardName, timelineId, order, rig, joystickId, removeKeys, bias, selectedOnly, language }) {
     rig = E.safeName(rig);
     const file = await fileKey();
+    // making the rig script opens it in the editor, which drops the selection, so read that first
+    const scope = selectedOnly ? await bindScope() : null;
+    await checkPoses(file, rig, timelineId, scope, t => E.joystickFormula("__VM__", rig, E.poseValues(t, [0, 1, 2, 3, 4]), order));
     const script = await ensureScript(rig, artboardId);   // before claim unbinds an earlier rig
     if (language && language !== script.language) log(`This file runs ${script.language === "luau" ? "Luau" : "AnimaScript"} scripts, so the rig script is ${script.language === "luau" ? "Luau" : "AnimaScript"}.`);
-    await claim(file, timelineId, rig);
+    await claim(file, timelineId, rig, "joystick");
     await joystickFree(joystickId, ["x", "y"], rig);
-    const scope = selectedOnly ? await selectedScope() : null;
     const tracks = await poseTracks(timelineId, scope);
     const rows = [];
     for (const t of tracks.values()) {
@@ -572,12 +679,13 @@ export function createRig(mcp, log = () => {}, store) {
     }
 
     const manifest = {
-      kind: "joystick", drive: "script", version: 1, file, rig, artboardId, timelineId, order, joystickId, vmId: vm.id,
+      kind: "joystick", drive: "script", version: 1, file, rig, artboardId, timelineId, ...await timelineInfo(timelineId), order, joystickId, vmId: vm.id,
       poseVmId: pv.poses.id, nestedPropId: pv.nestedPropId, script: script.name, scriptLanguage: script.language, made: script.made, bias, binds: made,
       tracks: rows.map(r => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, propertyName: r.t.propertyName,
-        keys: r.t.keys.map(k => ({ frame: k.frame, value: k.value, interpolationType: k.interpolationType })) })),
+        keys: E.savedKeys(r.t) })),
     };
     if (removeKeys) {
+      warnCurves(rows);
       const ids = rows.flatMap(r => r.t.keys.map(k => k.keyframeId));
       for (const part of chunks(ids, 400)) {
         await mcp("animation_editor", { command: "modifyKeyFrames", data: { modifyKeyFrames: { animationId: timelineId, delete: part } } });
@@ -615,77 +723,193 @@ export function createRig(mcp, log = () => {}, store) {
 
   // ------------------------------------------------------------ sliders
 
-  async function bindSliders({ artboardId, artboardName, timelineId, rig, poses, allowNegative, removeKeys, selectedOnly }) {
+  async function bindSliders({ artboardId, artboardName, timelineId, rig, poses, inputs = [], drive = "formula", allowNegative, removeKeys, selectedOnly }) {
     rig = E.safeName(rig);
     const file = await fileKey();
-    await claim(file, timelineId, rig);
-    const scope = selectedOnly ? await selectedScope() : null;
-    const tracks = await poseTracks(timelineId, scope);
     const frames = Array.from({ length: poses + 1 }, (_, i) => i);
+    const names = E.sliderInputs(rig, poses, inputs);
+    // making the rig script opens it in the editor, which drops the selection, so read that first
+    const scope = selectedOnly ? await bindScope() : null;
+    await checkPoses(file, rig, timelineId, scope, t => E.sliderFormula("__VM__", rig, E.poseValues(t, frames), allowNegative, names));
+    const script = drive === "script" ? await luauScript(rig, artboardId) : null;
+    await claim(file, timelineId, rig, "sliders");
+    const tracks = await poseTracks(timelineId, scope);
     const rows = [];
     for (const t of tracks.values()) {
       const values = E.poseValues(t, frames);
-      const formula = E.sliderFormula("__VM__", rig, values, allowNegative);
-      if (formula) rows.push({ t, formula });
+      const formula = E.sliderFormula("__VM__", rig, values, allowNegative, names);
+      if (formula) rows.push({ t, values, formula });
     }
     if (!rows.length) throw noChanges(tracks, scope);
     let vm = await artboardViewModel(artboardId, artboardName);
-    const names = frames.slice(1).map(i => `${rig}_s${i}`);
     const { vm: vm2, ids, added } = await ensureNumbers(vm, names);
     vm = vm2;
-    const convIds = await makeConverters(rows.map(r => ({ name: E.converterName(rig, r.t.objectId, r.t.propertyName), formula: r.formula.replaceAll("__VM__", vm.name) })));
-    const binds = await bind(vm.id, rows.map((r, i) => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, viewModelPropertyId: ids[names[0]], converterId: convIds[i] })), artboardId);
     const manifest = {
-      kind: "sliders", version: 1, file, rig, artboardId, timelineId, vmId: vm.id, addedProps: added, sliders: names, converters: convIds, binds,
+      kind: "sliders", drive, version: 1, file, rig, artboardId, timelineId, ...await timelineInfo(timelineId), vmId: vm.id, addedProps: added, sliders: [...new Set(names)], poseInputs: names, allowNegative,
       tracks: rows.map(r => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, propertyName: r.t.propertyName,
-        keys: r.t.keys.map(k => ({ frame: k.frame, value: k.value, interpolationType: k.interpolationType })) })),
+        keys: E.savedKeys(r.t) })),
     };
+    let note = "";
+    if (script) {
+      const pv = await poseViewModel(vm, rig, rows.map(r => r.values[0]), []);
+      const made = [];
+      try {
+        made.push(...await bind(pv.poses.id, rows.map((r, i) => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey,
+          viewModelPropertyId: pv.ids[`p${i}`], path: pv.path })), artboardId));
+        await setLanguage(script.name, script.language);
+        await writeScript(script.name, E.numInputScriptLuau(rig, names, rows, allowNegative));
+        note = await reloadHint(script.name, script.language);
+      } catch (e) {
+        await mcp("delete_objects", { objectIds: [...made, pv.nestedPropId, pv.poses.id] }).catch(() => {});
+        throw e;
+      }
+      Object.assign(manifest, { binds: made, poseVmId: pv.poses.id, nestedPropId: pv.nestedPropId, script: script.name, scriptLanguage: script.language, made: script.made });
+    } else {
+      const convIds = await makeConverters(rows.map(r => ({ name: E.converterName(rig, r.t.objectId, r.t.propertyName), formula: r.formula.replaceAll("__VM__", vm.name) })));
+      manifest.converters = convIds;
+      manifest.binds = await bind(vm.id, rows.map((r, i) => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, viewModelPropertyId: ids[names[0]], converterId: convIds[i] })), artboardId);
+    }
     if (removeKeys) {
+      warnCurves(rows);
       for (const part of chunks(rows.flatMap(r => r.t.keys.map(k => k.keyframeId)), 400)) {
         await mcp("animation_editor", { command: "modifyKeyFrames", data: { modifyKeyFrames: { animationId: timelineId, delete: part } } });
       }
       manifest.keysRemoved = true;
     }
     await saveManifest(manifest);
-    return manifest;
+    // poses are added one at a time, so say when the timeline holds more of them than were bound
+    const lastKeyed = Math.max(0, ...[...tracks.values()].flatMap(t => t.keys.map(k => k.frame)));
+    const past = lastKeyed > poses ? `The timeline has keys up to frame ${lastKeyed}, past pose ${poses}: add poses to bind those too.` : "";
+    return { ...manifest, note: [note, past].filter(Boolean).join(" ") };
   }
 
-  // a joystick (one axis or both) can drive a slider: x (or y) −1..1 → 0..100, or −100..100 with negatives
+  // One joystick axis drags one input. The axis gets an empty timeline of its own, which turns the
+  // joystick into a slider, and its position flows into the input through a converter.
   async function bindJoystickToSlider({ sliderRig, slider, joystickId, axis, allowNegative }) {
     const m = (await manifests()).find(x => x.kind === "sliders" && x.rig === sliderRig);
     if (!m) throw new Error("Bind a NumInput rig first.");
     await joystickFree(joystickId, [axis]);
-    const vm = ((await mcp("viewmodel_editor", { command: "listViewModels" })).viewModels || []).find(v => v.id === m.vmId);
-    const sliderPropId = vm.viewModelProperties.find(p => p.name === slider)?.id;
-    const formula = allowNegative ? "{Input} * 100" : "max(0, {Input}) * 100";
-    const [cid] = await makeConverters([{ name: `poser ${sliderRig} ${slider} from ${joystickId} ${axis}`, formula }]);
-    const propertyKey = axis === "y" ? 300 : 299;
-    const ids = await bind(m.vmId, [{ objectId: joystickId, propertyKey, viewModelPropertyId: sliderPropId, converterId: cid }], m.artboardId);
-    await toSource([{ objectId: joystickId, propertyKey }]);
+    if ((m.connections || []).some(c => c.slider === slider)) throw new Error(`${slider} already has a joystick. Disconnect it first.`);
+    const negative = m.allowNegative ?? allowNegative;
+    const vm = (await listVMs()).find(v => v.id === m.vmId);
+    const sliderPropId = (vm?.viewModelProperties || []).find(p => p.name === slider)?.id;
+    if (!sliderPropId) throw new Error(`The view model has no number "${slider}".`);
+    const key = AXIS[axis];
+    const [cid] = await makeConverters([{ name: `poser ${sliderRig} ${slider} from ${joystickId} ${axis}`, formula: E.axisFormula(negative) }]);
+    const timeline = await emptyTimeline(E.connectionTimeline(m.rig, slider), m.artboardId);
+    let ids;
+    try {
+      await mcp("set_property_values", { propertyValues: { [joystickId]: { [key.timeline]: timeline, [key.value]: E.axisRest(negative) } } });
+      ids = await bind(m.vmId, [{ objectId: joystickId, propertyKey: key.value, viewModelPropertyId: sliderPropId, converterId: cid }], m.artboardId);
+      await toSource([{ objectId: joystickId, propertyKey: key.value }]);
+    } catch (e) {
+      await mcp("delete_objects", { objectIds: [timeline, cid] }).catch(() => {});
+      throw e;
+    }
     m.binds = [...(m.binds || []), ...ids];
     m.converters = [...(m.converters || []), cid];
-    m.connections = [...(m.connections || []), { joystickId, axis, slider, bind: ids[0], converter: cid }];
+    m.connections = [...(m.connections || []), { joystickId, axis, slider, bind: ids[0], converter: cid, timeline }];
     await saveManifest(m);
   }
 
-  // ------------------------------------------------------------ switch
-
-  async function bindSwitch({ joystickRig, items }) {
-    const m = (await manifests()).find(x => x.kind === "joystick" && x.rig === joystickRig);
-    if (!m) throw new Error("Bind a joystick first; the toggler reads its position.");
-    const vm = ((await mcp("viewmodel_editor", { command: "listViewModels" })).viewModels || []).find(v => v.id === m.vmId);
-    const xId = vm.viewModelProperties.find(p => p.name === `${m.rig}_x`)?.id;
-    const conv = items.map((it, i) => ({ name: `poser ${m.rig} switch ${it.id}`, formula: E.switchFormula(vm.name, m.rig, items, i) }));
-    const convIds = await makeConverters(conv);
-    const ids = await bind(vm.id, items.map((it, i) => ({ objectId: it.id, propertyKey: 18, viewModelPropertyId: xId, converterId: convIds[i] })), m.artboardId);
-    m.binds = [...(m.binds || []), ...ids];
-    m.switches = [...(m.switches || []), ...items.map((it, i) => ({ objectId: it.id, converter: convIds[i], x: it.x, y: it.y }))];
+  // undoes one Connect and leaves the rig and its other connections alone
+  async function disconnectSlider(m, slider) {
+    const c = (m.connections || []).find(x => x.slider === slider);
+    if (!c) throw new Error(`${slider} has no joystick.`);
+    const key = AXIS[c.axis];
+    unbound.add(pair({ objectId: c.joystickId, propertyKey: key.value }));
+    const kept = c.timeline && (await keyedTimelines([c.timeline])).has(c.timeline);
+    await mcp("delete_objects", { objectIds: [c.bind] });
+    await mcp("delete_objects", { objectIds: [c.converter, ...(c.timeline && !kept ? [c.timeline] : [])] }).catch(() => {});
+    if (!kept) await mcp("set_property_values", { propertyValues: { [c.joystickId]: { [key.value]: 0 } } }).catch(() => {});
+    m.binds = (m.binds || []).filter(b => b !== c.bind);
+    m.converters = (m.converters || []).filter(x => x !== c.converter);
+    m.connections = m.connections.filter(x => x !== c);
     await saveManifest(m);
+    const left = (await allBinds()).filter(d => d.objectId === c.joystickId && d.propertyKey === key.value).length;
+    return { left, kept: kept ? E.connectionTimeline(m.rig, c.slider) : null };
+  }
+
+  // ------------------------------------------------------------ toggler
+
+  // Only the item nearest the control stays visible. A free joystick becomes this rig's own control
+  // (empty timelines on the axes it uses). A joystick that already drives a formula Joystick rig is
+  // read through that rig's position numbers and stays as it is.
+  async function bindToggler({ artboardId, artboardName, rig, drive = "formula", joystickId, axes = "xy", items }) {
+    rig = E.safeName(rig);
+    if (items.length < 2) throw new Error("Load at least two items.");
+    const file = await fileKey();
+    const script = drive === "script" ? await luauScript(rig, artboardId) : null;
+    await claim(file, null, rig, "toggler");
+    const host = (await manifests()).find(m => m.kind === "joystick" && m.joystickId === joystickId);
+    if (host?.drive === "script") throw new Error(`That joystick drives the script rig "${host.rig}", and a toggler can't read its position. Add another joystick (J), or bind that rig with formula converters.`);
+    if (host && axes !== "xy") throw new Error(`That joystick drives the rig "${host.rig}" on both axes, so it can't be a slider. Choose Joystick (both axes), or add another joystick (J).`);
+    if (!host) await joystickFree(joystickId, [...axes], rig);
+
+    const pos = host ? { x: `${host.rig}_x`, y: `${host.rig}_y` }
+      : { x: axes.includes("x") ? `${rig}_x` : null, y: axes.includes("y") ? `${rig}_y` : null };
+    const vmStart = await artboardViewModel(artboardId, artboardName);
+    const { vm, ids, added } = await ensureNumbers(vmStart, host ? [] : [...axes].map(a => pos[a]));
+    const shown = (await mcp("query_property_values", { propertyKeys: Object.fromEntries(items.map(it => [it.id, [18]])) })).values || {};
+
+    const made = [];   // deleted again if a step fails, so no half-made rig stays
+    const manifest = { kind: "toggler", drive, version: 1, file, rig, artboardId, joystickId, axes, pos, vmId: vm.id, addedProps: added, tracks: [], timelines: {},
+      ...(host ? { source: host.rig } : {}),
+      items: items.map(it => ({ id: it.id, name: it.name, x: it.x, y: it.y, opacity: shown[it.id]?.["18"] ?? 1 })) };
+    const binds = [];
+    let note = "";
+    try {
+      if (!host) {
+        const set = {};
+        for (const a of axes) {
+          const id = await emptyTimeline(`${rig} ${a.toUpperCase()}`, artboardId);
+          made.push(id);
+          manifest.timelines[a.toUpperCase()] = id;
+          set[AXIS[a].timeline] = id;
+          set[AXIS[a].value] = items[0][a];   // at rest the first item shows, not a tie between them
+        }
+        await mcp("set_property_values", { propertyValues: { [joystickId]: set } });
+        const control = [...axes].map(a => ({ objectId: joystickId, propertyKey: AXIS[a].value, viewModelPropertyId: ids[pos[a]] }));
+        binds.push(...await bind(vm.id, control, artboardId));
+        made.push(...binds);
+        await toSource(control.map(({ objectId, propertyKey }) => ({ objectId, propertyKey })));
+      }
+      if (script) {
+        const pv = await poseViewModel(vm, rig, items.map((_, i) => (i ? 0 : 1)), []);
+        made.push(pv.nestedPropId, pv.poses.id);
+        const itemBinds = await bind(pv.poses.id, items.map((it, i) => ({ objectId: it.id, propertyKey: 18, viewModelPropertyId: pv.ids[`p${i}`], path: pv.path })), artboardId);
+        made.unshift(...itemBinds);
+        binds.push(...itemBinds);
+        await setLanguage(script.name, script.language);
+        await writeScript(script.name, E.togglerScriptLuau(rig, items, pos));
+        note = await reloadHint(script.name, script.language);
+        Object.assign(manifest, { poseVmId: pv.poses.id, nestedPropId: pv.nestedPropId, script: script.name, scriptLanguage: script.language, made: script.made });
+      } else {
+        const convIds = await makeConverters(items.map((it, i) => ({ name: `poser ${rig} switch ${it.id}`, formula: E.switchFormula(vm.name, rig, items, i, pos) })));
+        made.push(...convIds);
+        manifest.converters = convIds;
+        const itemBinds = await bind(vm.id, items.map((it, i) => ({ objectId: it.id, propertyKey: 18, viewModelPropertyId: ids[pos.x || pos.y], converterId: convIds[i] })), artboardId);
+        made.unshift(...itemBinds);
+        binds.push(...itemBinds);
+      }
+    } catch (e) {
+      await mcp("delete_objects", { objectIds: made }).catch(() => {});
+      if (!host) await mcp("set_property_values", { propertyValues: { [joystickId]: Object.fromEntries([...axes].map(a => [AXIS[a].value, 0])) } }).catch(() => {});
+      throw e;
+    }
+    manifest.binds = binds;
+    await saveManifest(manifest);
+    return { ...manifest, note };
   }
 
   // ------------------------------------------------------------ unbind
 
   async function unbind(m) {
+    if (m.kind === "joystick") {
+      const reader = (await manifests()).find(t => t.kind === "toggler" && t.source === m.rig);
+      if (reader) throw new Error(`The toggler "${reader.rig}" reads this rig's joystick. Unbind it first, on the Toggler tab.`);
+    }
+    const timeline = m.keysRemoved ? await poseTimeline(m) : null;
     const binds = m.binds || [];
     const vm0 = ((await mcp("viewmodel_editor", { command: "listViewModels" })).viewModels || []).find(v => v.id === m.vmId);
     const rigProps = new Set((vm0?.viewModelProperties || []).filter(p => (m.addedProps || []).includes(p.name)).map(p => p.id));
@@ -696,9 +920,9 @@ export function createRig(mcp, log = () => {}, store) {
     for (const k of mine) unbound.add(k);
     for (const part of chunks(binds, 400)) await mcp("delete_objects", { objectIds: part });
     if (m.keysRemoved) {
-      const add = m.tracks.flatMap(t => t.keys.map(k => ({ objectId: t.objectId, propertyKey: t.propertyKey, frame: k.frame, value: k.value, interpolationType: k.interpolationType || "linear" })));
+      const add = m.tracks.flatMap(t => t.keys.map(k => ({ objectId: t.objectId, propertyKey: t.propertyKey, ...k, interpolationType: k.interpolationType || "linear" })));
       for (const part of chunks(add, 400)) {
-        await mcp("animation_editor", { command: "modifyKeyFrames", data: { modifyKeyFrames: { animationId: m.timelineId, add: part } } });
+        await mcp("animation_editor", { command: "modifyKeyFrames", data: { modifyKeyFrames: { animationId: timeline.id, add: part } } });
       }
     }
     // converters go too; the editor's converter list can keep a stale entry until reload
@@ -712,9 +936,27 @@ export function createRig(mcp, log = () => {}, store) {
       else { try { await writeScript(m.script, E.placeholderScript(m.rig, m.scriptLanguage)); } catch {} }
     }
     else if (m.kind === "joystick") extra.push(...Object.values(m.nodes), m.groupId, m.timelines.X, m.timelines.Y);
+    // a connection's timeline and a toggler's own ones go too, which clears the joystick's axes.
+    // A keyed one stays, and its joystick keeps its handle where it is, since that scrubs those keys.
+    const axisTimelines = [...(m.connections || []).filter(c => c.timeline).map(c => ({ id: c.timeline, name: E.connectionTimeline(m.rig, c.slider) })),
+      ...(m.kind === "toggler" ? Object.entries(m.timelines || {}).map(([axis, id]) => ({ id, name: `${m.rig} ${axis}` })) : [])];
+    const keyed = await keyedTimelines(axisTimelines.map(t => t.id));
+    extra.push(...axisTimelines.filter(t => !keyed.has(t.id)).map(t => t.id));
+    // the handle goes back to the centre and the items to the opacity they had
+    const rest = {};
+    for (const c of m.connections || []) if (!keyed.has(c.timeline)) (rest[c.joystickId] ||= {})[AXIS[c.axis].value] = 0;
+    if (m.kind === "toggler" && !m.source) for (const a of m.axes) if (!keyed.has(m.timelines?.[a.toUpperCase()])) (rest[m.joystickId] ||= {})[AXIS[a].value] = 0;
+    for (const it of m.kind === "toggler" ? m.items : []) rest[it.id] = { 18: it.opacity };
+    if (Object.keys(rest).length) await mcp("set_property_values", { propertyValues: rest }).catch(() => {});
     let leftovers = 0;
     for (const part of chunks(extra, 400)) {
-      try { await mcp("delete_objects", { objectIds: part }); } catch { leftovers += part.length; }
+      // one id that's already gone can fail a whole batch, so the rest are tried one by one
+      try { await mcp("delete_objects", { objectIds: part }); }
+      catch {
+        for (const id of part) {
+          try { await mcp("delete_objects", { objectIds: [id] }); } catch { leftovers++; }
+        }
+      }
     }
     // the view model numbers this rig added (deleting a property removes its instance values)
     const vm = ((await mcp("viewmodel_editor", { command: "listViewModels" })).viewModels || []).find(v => v.id === m.vmId);
@@ -723,7 +965,8 @@ export function createRig(mcp, log = () => {}, store) {
     await dropManifest(m);
     // binds the editor still lists would be retargeted, not replaced, by the next bind there
     const left = (await allBinds()).filter(d => mine.has(pair(d))).length;
-    return { binds: binds.length, restored: m.keysRemoved ? m.tracks.length : 0, leftovers, left };
+    return { binds: binds.length, restored: m.keysRemoved ? m.tracks.length : 0, leftovers, left, recreated: timeline?.recreated,
+      keptTimelines: axisTimelines.filter(t => keyed.has(t.id)).map(t => t.name) };
   }
 
   // ------------------------------------------------------------ tools
@@ -798,6 +1041,6 @@ export function createRig(mcp, log = () => {}, store) {
     return flipped.length;
   }
 
-  return { fileKey, artboards, timelines, joysticks, selection, ensureScript, saveManifest, takeWarning, bindJoystick, bindJoystickScript, setEaseBias, bindSliders,
-           bindJoystickToSlider, bindSwitch, unbind, manifests, keyAll, unkeyFlat, pasteOrigin, pathFlip };
+  return { fileKey, artboards, timelines, joysticks, selection, ensureScript, saveManifest, takeWarning, bindJoystick, bindJoystickScript, setEaseBias, bindSliders, numbers,
+           bindJoystickToSlider, disconnectSlider, bindToggler, unbind, manifests, unreadableRecords, keyAll, unkeyFlat, pasteOrigin, pathFlip };
 }

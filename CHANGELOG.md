@@ -2,6 +2,80 @@
 
 All notable changes to Poser, newest first.
 
+## [3.2.6] — 2026-11-05
+
+### Fixed
+- **"Only the selection" with the script drive failed on the first click:** Poser made the rig script
+  first, which opens it in the editor and drops the selection, then read the empty selection and
+  refused with "no number keys for the selection". The selection is now read first.
+- **A refused bind makes nothing:** a selection or timeline with no usable keys is refused before the
+  script is created, so no blank script is left open.
+
+## [3.2.5] — 2026-11-05
+
+### Fixed
+- **Unbind and Disconnect keep keyed joystick timelines:** a timeline Poser put on a joystick's axis
+  used to be deleted even if it had keys on it. Now it stays, its joystick keeps its handle where it
+  is, and the status line says so. If the check fails, the timeline stays too.
+
+## [3.2.4] — 2026-11-05
+
+### Fixed
+- **Unbind restores custom curves:** a rig now records each pose key's cubic or elastic settings and
+  puts them back. If the editor reports a curved key without its curve, Poser warns at bind. Rigs
+  bound before this version have no record of their curves.
+- **Empty rig records are reported:** a `poser <rig> dataBkp` script Poser can't read now shows a
+  warning in the panel instead of being skipped silently.
+- **Unbind cleanup:** one object that's already gone no longer stops the others in its batch from
+  being removed.
+- **Warnings no longer overwrite each other.**
+
+## [3.2.3] — 2026-11-05
+
+### Fixed
+- **Unbind after deleting the pose timeline:** Unbind checks whether the original timeline exists.
+  If it does, the keys go back there. If not, Poser makes it again with its name, fps, length, speed
+  and loop, then restores the keys. Rigs bound before this version have no record of those settings,
+  so theirs is called `<rig> poses`, at 60 fps and long enough for its keys.
+
+## [3.2.2] — 2026-11-05
+
+### Changed
+- **Explanations fold behind a `?` button** at the end of the element they describe, one open at a
+  time, so the panel stays short.
+
+## [3.2.1] — 2026-11-05
+
+### Changed
+- **Connect picks a pose:** one dropdown of the poses that have no joystick yet, grouped by rig,
+  replaces the rig and input fields.
+- **Add pose:** poses start at one and grow with a button, with no four-pose default or upper limit.
+  Poser says when the timeline has keys past the last pose you bound.
+- **"Only the selection"** explains that it includes what's nested inside the selected objects.
+
+### Fixed
+- **"Only the selection" with nothing selected** is refused. It used to bind the whole timeline.
+
+## [3.2.0] — 2026-11-05
+
+### Added
+- **NumInput drive:** choose formula converters or one script, as on the Joystick tab (Luau files).
+- **NumInput inputs:** each pose makes a new number or reads one the artboard's view model already
+  has. Unbind leaves the numbers you picked.
+- **Disconnect:** undoes one joystick connection and leaves the rest of the NumInput rig.
+- **Toggler is self-contained:** its own rig name, drive, joystick, control (both axes or a
+  one-axis slider) and Unbind, with no Joystick rig needed first. It can still read a joystick that
+  drives a formula Joystick rig. Unbind puts the items back at the opacity they had.
+
+### Changed
+- **Connect turns the joystick into a slider:** Poser puts an empty timeline (`<rig> <input>`) on
+  the axis. Without negatives the whole travel now runs 0 to 100 and the handle rests at that end
+  (the left half used to do nothing). The input's range comes from the rig, not the checkbox.
+- **Input under Connect is a dropdown** of the rig's inputs instead of a pose index.
+- **Each tab lists and unbinds only its own rigs**, and a rig name used on another tab is refused
+  instead of unbinding that rig.
+- The pose timeline list leaves out the timelines Poser made.
+
 ## [3.1.0] — 2026-11-03
 
 ### Added
