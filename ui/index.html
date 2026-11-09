@@ -39,6 +39,7 @@
   button:disabled { opacity: .45; cursor: default; }
   .hint { color: var(--dim); font-size: 11px; margin: 0; }
   .warn { color: var(--err); font-size: 11px; margin: 0; }
+  .choice { display: flex; flex-direction: column; gap: 6px; }
   .help {
     flex: 0 0 16px; width: 16px; height: 16px; padding: 0; margin-left: auto; border-radius: 50%;
     background: none; color: var(--dim); font-size: 10px; font-weight: 600; line-height: 1;
@@ -71,6 +72,7 @@
     <div class="row" id="timelineRow"><label>Pose timeline</label><select id="timeline"></select></div>
     <div class="row"><button id="refresh">Refresh lists</button></div>
     <p class="warn" id="unreadable" hidden></p>
+    <div class="row" id="reloadRow" hidden><p class="warn">Reload the file in Rive (Cmd+R), then click Reloaded. Until a reload, Rive can crash on view-model data Poser just removed.</p><button id="reloaded" style="flex:0 0 auto">Reloaded</button></div>
   </div>
 
   <div class="tabs">
@@ -86,8 +88,8 @@
       <h3>Bind</h3>
       <p class="hint">Key the origin on frame 0 and the four extremes on frames 1–4, keying every property on every pose. Add a joystick (J) to the artboard, then bind.</p>
       <div class="row"><label>Drive</label><select id="drive">
-        <option value="formula">Formula converters</option>
-        <option value="script">One script</option>
+        <option value="script" selected>One script</option>
+        <option value="formula">Formula converters (fallback)</option>
       </select></div>
       <p class="hint" id="driveHint"></p>
       <div class="row"><label>Frame order</label><select id="order"></select></div>
@@ -98,6 +100,10 @@
       <p class="hint">Binds only the selected objects and what's nested inside them in the Hierarchy, such as a group's shapes or a path's vertices.</p>
       <label class="check"><input type="checkbox" id="removeKeys" checked /> Remove the pose keys (Unbind restores them)</label>
       <button class="primary" id="bindJoy">Bind to joystick</button>
+      <div class="choice" id="joyChoice" hidden>
+        <p class="warn" id="joyChoiceText"></p>
+        <div class="row"><button id="joySkip">Skip them</button><button id="joyCancel" style="flex:0 0 auto">Cancel</button></div>
+      </div>
     </div>
     <div class="card">
       <h3>Ease bias</h3>
@@ -124,8 +130,8 @@
       <h3>Bind</h3>
       <p class="hint">The origin goes on frame 0 and one pose on each following frame. Each pose reads a number (0–100) in the artboard's view model, and the numbers add together like blend shapes.</p>
       <div class="row"><label>Drive</label><select id="sliderDrive">
-        <option value="formula">Formula converters</option>
-        <option value="script">One script</option>
+        <option value="script" selected>One script</option>
+        <option value="formula">Formula converters (fallback)</option>
       </select></div>
       <p class="hint" id="sliderDriveHint"></p>
       <div class="row"><label>Rig name</label><input type="text" id="sliderRig" value="numinput" /></div>
@@ -138,6 +144,11 @@
       <p class="hint">Binds only the selected objects and what's nested inside them in the Hierarchy, such as a group's shapes or a path's vertices.</p>
       <label class="check"><input type="checkbox" id="sliderRemoveKeys" checked /> Remove the pose keys</label>
       <button class="primary" id="bindSliders">Bind to NumInput</button>
+      <div class="choice" id="sliderChoice" hidden>
+        <p class="warn" id="sliderChoiceText"></p>
+        <div class="row"><button id="sliderShare">Share</button><button id="sliderSkip">Skip them</button><button id="sliderCancel" style="flex:0 0 auto">Cancel</button></div>
+        <p class="hint">Share leaves the other rig bound and adds this rig's pose to those properties through its script (One script on both rigs, same rest values). Skip binds everything else and leaves those properties to the other rig.</p>
+      </div>
     </div>
     <div class="card">
       <h3>Connect a joystick</h3>
@@ -161,8 +172,8 @@
       <h3>Bind</h3>
       <p class="hint">Only the item nearest the control stays visible. Select the swap items (mouths, noses…), load them, and set where each one sits (−1 to 1, y down).</p>
       <div class="row"><label>Drive</label><select id="togglerDrive">
-        <option value="formula">Formula converters</option>
-        <option value="script">One script</option>
+        <option value="script" selected>One script</option>
+        <option value="formula">Formula converters (fallback)</option>
       </select></div>
       <p class="hint" id="togglerDriveHint"></p>
       <div class="row"><label>Rig name</label><input type="text" id="togglerRig" value="toggler" /></div>
@@ -234,7 +245,11 @@ function explain(e) {
   if (/status code 4\d\d/i.test(raw)) return "The Rive editor refused the request. Quit and reopen Poser; if that doesn't help, restart Rive.";
   return raw;
 }
-const status = (msg, kind = "") => { const s = $("status"); s.textContent = msg || ""; s.className = kind; s.hidden = !msg; };
+let lastNote = "";
+const status = (msg, kind = "") => {
+  const s = $("status"); s.textContent = msg || ""; s.className = kind; s.hidden = !msg;
+  if (msg && msg !== lastNote) { lastNote = msg; window.__TAURI__?.core?.invoke("log_note", { line: `${kind || "info"}: ${msg}` }).catch(() => {}); }
+};
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
 const store = { list: () => invoke("rig_list"), save: (name, json) => invoke("rig_save", { name, json }), remove: name => invoke("rig_remove", { name }) };
 const rig = createRig(mcp, m => status(m), store);
@@ -327,15 +342,23 @@ async function refresh() {
   $("unreadable").textContent = lost.map(n => `The record "poser ${n} dataBkp" is empty or damaged, so Poser can't list or unbind the rig "${n}".`).join(" ");
   const names = kind => ms.filter(m => m.kind === kind).map(m => ({ name: m.rig, id: m.rig }));
   fill($("easeRig"), names("joystick"));
-  fill($("rigs"), ms.filter(m => m.kind === "joystick").map(m => ({ name: `${m.rig} · ${m.tracks.length} props`, id: m.rig })));
-  fill($("sliderRigs"), ms.filter(m => m.kind === "sliders").map(m => ({ name: `${m.rig} · ${m.tracks.length} props`, id: m.rig })));
-  fill($("togglerRigs"), ms.filter(m => m.kind === "toggler").map(m => ({ name: `${m.rig} · ${m.items.length} items`, id: m.rig })));
+  const rigLabel = (m, what) => ({ name: m.cleanup ? `${m.rig} · view model left (Unbind after a reload)` : `${m.rig} · ${what(m)}`, id: m.rig });
+  fill($("rigs"), ms.filter(m => m.kind === "joystick").map(m => rigLabel(m, x => `${x.tracks.length} props`)));
+  fill($("sliderRigs"), ms.filter(m => m.kind === "sliders").map(m => rigLabel(m, x => `${x.tracks.length} props`)));
+  fill($("togglerRigs"), ms.filter(m => m.kind === "toggler").map(m => rigLabel(m, x => `${(x.items || []).length} items`)));
   drawConnections();
   const em = ms.find(m => m.rig === $("easeRig").value);
   if (em) document.querySelectorAll(".bias input").forEach(r => { r.value = em.bias?.[r.dataset.dir] || 0; r.nextElementSibling.textContent = r.value; });
 }
 $("artboard").addEventListener("change", () => { $("artboard").dataset.touched = "1"; refresh().catch(e => status(e.message, "err")); });
 $("easeRig").addEventListener("change", () => refresh().catch(e => status(e.message, "err")));
+
+// After Poser removes view-model data, the editor keeps stale copies until the file is reloaded,
+// and changing view models before that has crashed Rive 0.9.517. So binds, connects and unbinds
+// wait for the user to reload.
+let needsReload = false;
+const askReload = () => { needsReload = true; $("reloadRow").hidden = false; };
+const requireReload = () => { if (needsReload) throw new Error("Reload the file in Rive first (Cmd+R), then click Reloaded."); };
 
 // one action at a time; every button reports through the status line
 let busy = false;                           // an action is talking to Rive; the watcher waits
@@ -349,7 +372,7 @@ function action(id, fn) {
       const warn = rig.takeWarning();
       status(`${msg}${warn ? " " + warn : ""} (${((performance.now() - t0) / 1000).toFixed(1)} s)`, warn ? "err" : "ok");
       await refresh();
-    } catch (e) { status(explain(e), "err"); }
+    } catch (e) { status(explain(e), "err"); if (e?.rolledBack) askReload(); }
     finally { busy = false; document.querySelectorAll("button").forEach(b => (b.disabled = false)); }
   });
 }
@@ -368,14 +391,40 @@ driveHint("drive", "rig", "Each pose is baked into one formula converter per pro
 driveHint("sliderDrive", "sliderRig", "Each pose is baked into one formula converter per property. No script runs.");
 driveHint("togglerDrive", "togglerRig", "Each item gets one formula converter on its opacity. No script runs.");
 
-action("bindJoy", async () => {
+// A bind that meets properties another rig already binds asks what to do: share them (NumInput,
+// One script on both rigs), skip them and bind the rest, or cancel.
+function choose(prefix, run) {
+  return async () => {
+    $(`${prefix}Choice`).hidden = true;
+    try { return await run("ask"); }
+    catch (e) {
+      if (!e.choice) throw e;
+      $(`${prefix}ChoiceText`).textContent = e.message;
+      const share = $(`${prefix}Share`);
+      if (share) { share.hidden = !e.choice.shareable; share.textContent = `Share ${e.choice.shareable} with ${e.choice.owners.join(", ")}`; }
+      $(`${prefix}Skip`).textContent = `Skip ${e.choice.count}, bind the rest`;
+      $(`${prefix}Choice`).hidden = false;
+      return "Some of these properties are already bound by another rig: choose below.";
+    }
+  };
+}
+const chosen = (prefix, run, onBound) => async () => { $(`${prefix}Choice`).hidden = true; return run(onBound); };
+$("reloaded").addEventListener("click", () => { needsReload = false; $("reloadRow").hidden = true; status("Thanks. Binding is open again."); refresh().catch(() => {}); });
+for (const prefix of ["joy", "slider"]) $(`${prefix}Cancel`).addEventListener("click", () => { $(`${prefix}Choice`).hidden = true; status("Bind cancelled."); });
+const settledText = m => [m.shared ? `${m.shared} shared with ${[...new Set((m.shares || []).map(x => x.owner))].join(", ")}` : "",
+  m.skipped ? `${m.skipped} skipped${m.restDiffers ? ` (${m.restDiffers} because their rest values differ from the other rig's)` : ""}` : ""].filter(Boolean).join(", ");
+
+async function runBindJoy(onBound) {
+  requireReload();
   if (!$("joystick").value) throw new Error("Add a joystick to the artboard first (J), then refresh.");
   const bindFn = $("drive").value === "script" ? rig.bindJoystickScript : rig.bindJoystick;
   const m = await bindFn({ artboardId: $("artboard").value, artboardName: abName(), timelineId: $("timeline").value,
     order: ORDERS[$("order").value], rig: $("rig").value, joystickId: $("joystick").value,
-    removeKeys: $("removeKeys").checked, selectedOnly: $("selectedOnly").checked, bias: {} });
-  return `Bound ${m.tracks.length} properties to ${m.rig}${m.drive === "script" ? ` through the "${m.script}" script` : ""}.${m.note ? " " + m.note : ""}`;
-});
+    removeKeys: $("removeKeys").checked, selectedOnly: $("selectedOnly").checked, bias: {}, onBound });
+  return `Bound ${m.tracks.length} properties to ${m.rig}${m.drive === "script" ? ` through the "${m.script}" script` : ""}${onBound === "skip" ? ", skipping the ones another rig binds" : ""}.${m.note ? " " + m.note : ""}`;
+}
+action("bindJoy", choose("joy", runBindJoy));
+action("joySkip", chosen("joy", runBindJoy, "skip"));
 action("applyEase", async () => {
   const m = (await rig.manifests()).find(x => x.rig === $("easeRig").value);
   if (!m) throw new Error("Bind a joystick first.");
@@ -383,14 +432,21 @@ action("applyEase", async () => {
   await rig.setEaseBias(m, bias);
   return "Ease bias applied.";
 });
-action("bindSliders", async () => {
+async function runBindSliders(onBound) {
+  requireReload();
   const m = await rig.bindSliders({ artboardId: $("artboard").value, artboardName: abName(), timelineId: $("timeline").value,
     rig: $("sliderRig").value, drive: $("sliderDrive").value, poses: poseCount,
     inputs: [...$("poseInputs").querySelectorAll("select")].map(sel => sel.value), allowNegative: $("negative").checked,
-    removeKeys: $("sliderRemoveKeys").checked, selectedOnly: $("sliderSelectedOnly").checked });
-  return `Bound ${m.tracks.length} properties to ${m.sliders.length} inputs${m.drive === "script" ? ` through the "${m.script}" script` : ""}.${m.note ? " " + m.note : ""}`;
-});
+    removeKeys: $("sliderRemoveKeys").checked, selectedOnly: $("sliderSelectedOnly").checked, onBound });
+  const own = m.tracks.filter(t => !t.share).length;
+  const settled = settledText(m);
+  return `Bound ${own} properties to ${m.sliders.length} inputs${m.drive === "script" ? ` through the "${m.script}" script` : ""}${settled ? `; ${settled}` : ""}.${m.note ? " " + m.note : ""}`;
+}
+action("bindSliders", choose("slider", runBindSliders));
+action("sliderShare", chosen("slider", runBindSliders, "share"));
+action("sliderSkip", chosen("slider", runBindSliders, "skip"));
 action("bindUiSlider", async () => {
+  requireReload();
   if (!$("uiPose").value) throw new Error(rigsNow.some(m => m.kind === "sliders") ? "Every pose already has a joystick." : "Bind a NumInput rig first.");
   if (!$("uiJoystick").value) throw new Error("Add a joystick to the artboard first (J), then refresh.");
   const [sliderRig, slider] = JSON.parse($("uiPose").value);
@@ -399,6 +455,7 @@ action("bindUiSlider", async () => {
   return `${label} connected: the joystick is a slider on ${$("uiAxis").value} now.`;
 });
 action("disconnect", async () => {
+  requireReload();
   const [sliderRig, slider] = JSON.parse($("connection").value);
   const m = (await rig.manifests()).find(x => x.kind === "sliders" && x.rig === sliderRig);
   if (!m) throw new Error("Nothing to disconnect.");
@@ -427,6 +484,7 @@ action("loadItems", async () => {
   return `${sel.length} items loaded.`;
 });
 action("bindSwitch", async () => {
+  requireReload();
   if (switchItems.length < 2) throw new Error("Load at least two items.");
   if (!$("switchJoystick").value) throw new Error("Add a joystick to the artboard first (J), then refresh.");
   const m = await rig.bindToggler({ artboardId: $("artboard").value, artboardName: abName(), rig: $("togglerRig").value, drive: $("togglerDrive").value,
@@ -441,14 +499,18 @@ action("flipH", async () => `Flipped ${await rig.pathFlip({ vertical: false })} 
 action("flipV", async () => `Flipped ${await rig.pathFlip({ vertical: true })} vertices.`);
 function unbindButton(button, select) {
   action(button, async () => {
+    requireReload();
     const m = (await rig.manifests()).find(x => x.rig === $(select).value);
     if (!m) throw new Error("Nothing to unbind.");
     const r = await rig.unbind(m);
-    const back = m.kind === "toggler" ? `${m.items.length} items restored` : `${r.restored} tracks restored`;
+    askReload();
+    if (r.cleaned) return `Removed ${m.rig}'s nested view model. ${m.rig} is fully unbound.`;
+    const back = m.kind === "toggler" ? `${(m.items || []).length} items restored` : `${r.restored} tracks restored`;
     return `Unbound ${m.rig}: ${r.binds} binds removed, ${back}${r.leftovers ? `, ${r.leftovers} objects to delete by hand` : ""}${r.left ? `. The editor still lists ${r.left} of the removed binds: reload the file (Cmd+R) before binding these objects or this joystick again` : ""}.`
       + (r.recreated ? ` The pose timeline was gone, so Poser made it again as "${r.recreated}".` : "")
       + (r.keptTimelines.length ? ` ${r.keptTimelines.map(n => `"${n}"`).join(", ")} ${r.keptTimelines.length > 1 ? "have" : "has"} keys, so ${r.keptTimelines.length > 1 ? "they stay" : "it stays"} and the joystick stays a slider. Delete ${r.keptTimelines.length > 1 ? "them" : "it"} yourself if you don't need the keys.` : "")
-      + (m.drive === "script" && !m.made?.placement ? ` The "${m.script}" script is still on the artboard: delete it there.` : "");
+      + (m.drive === "script" && !m.made?.placement ? ` The "${m.script}" script is still on the artboard: delete it there.` : "")
+      + (r.cleanupPending ? ` Its nested view model is still in the file: reload (Cmd+R), click Reloaded, then Unbind again to remove it. Deleting view-model data before a reload has crashed Rive, so it goes on its own.` : "");
   });
 }
 unbindButton("unbind", "rigs");

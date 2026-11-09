@@ -426,8 +426,8 @@ test("a toggler's keyed axis timeline stays while the empty one goes", async () 
 });
 
 // an editor where making a script opens it and moves the selection off the keys
-function scriptEditor(selected) {
-  const assets = [], texts = {}, created = [];
+function scriptEditor(selected, more = {}, seed = []) {
+  const assets = seed.map(a => ({ ...a, seed: true })), texts = Object.fromEntries(seed.map(a => [a.name, a.text || "old"])), created = [];
   let ed;
   ed = editor({
     get_selection: () => ({ selection: selected }),
@@ -448,7 +448,7 @@ function scriptEditor(selected) {
     find_objects: a => ({ objects: a.type === "ScriptedDrawable" ? [{ id: "pl", type: "ScriptedDrawable" }] : [] }),
     query_property_values: a => {
       const [id, keys] = Object.entries(a.propertyKeys)[0];
-      if (keys.includes(848)) return { values: { pl: { 848: "s0" } } };
+      if (keys.includes(848)) return { values: { pl: { 848: assets.find(x => !x.seed)?.id ?? "s0" } } };
       if (keys.includes(901)) return { values: { [id]: { 901: `cf ${id}` } } };
       if (keys.includes(959)) return { values: { [id]: { 959: 0 } } };
       return undefined;
@@ -463,8 +463,9 @@ function scriptEditor(selected) {
       if (a.command === "listViewModelInstances") return { instances: [{ id: "inst", name: "Default", viewModelProperties: [] }] };
       return undefined;
     },
+    ...more,
   });
-  return { ...ed, rig: createRig(ed.mcp, () => {}, ed.store) };
+  return { ...ed, texts, rig: createRig(ed.mcp, () => {}, ed.store) };
 }
 const scriptNumInput = rig => rig.bindSliders({ artboardId: "A", artboardName: "Board", timelineId: "T1", rig: "num", poses: 2, inputs: [""], drive: "script", allowNegative: false, removeKeys: false, selectedOnly: true });
 
@@ -487,4 +488,175 @@ test("a selection with no keys is refused before any script is made", async () =
   const t = scriptEditor([{ id: "elsewhere" }]);
   await assert.rejects(scriptNumInput(t.rig), /no number keys for the selection/);
   assert.equal(made(t.calls, "manage_scripts").length, 0);
+});
+
+const singleDeletes = calls => made(calls, "delete_objects").map(c => c.args.objectIds);
+
+test("properties another rig still binds are refused before any script or view model is made", async () => {
+  const t = scriptEditor([{ id: "o" }]);
+  t.setBinds([{ objectId: "o", propertyKey: 13, property: "x", objectName: "arm", viewModelPropertyName: "p3", viewModelName: "poser Op2breathe" }]);
+  await assert.rejects(scriptNumInput(t.rig), e => /still bound to poser Op2breathe\/p3/.test(e.message) && e.choice?.count === 1);
+  for (const [tool, command] of [["manage_scripts"], ["viewmodel_editor", "createViewModels"], ["viewmodel_editor", "addProperties"], ["delete_objects"]])
+    assert.equal(made(t.calls, tool, command).length, 0, `${tool} ${command || ""}`);
+});
+
+// two keyed properties, o and o2; Op2arm (a One-script NumInput rig) already binds o2
+function shareEditor({ ownerRest = 0 } = {}) {
+  const keys = ["o", "o2"].flatMap(objectId => [0, 1, 2].map(frame => ({ objectId, propertyKey: 13, propertyName: "x", frame, type: "double", value: frame * 10, keyframeId: `${objectId}k${frame}` })));
+  const t = scriptEditor([{ id: "o" }, { id: "o2" }], {
+    animation_editor: a => (a.command === "queryKeyFrames" ? { keyframes: { T1: keys } } : undefined),
+  }, [{ id: "sOwner", name: "poser Op2arm", type: "script", scriptProtocol: "node", text: "-- the owner's old script" }]);
+  t.setBinds([{ objectId: "o2", propertyKey: 13, property: "x", objectName: "vertex", viewModelPropertyName: "Op2arm_p0", viewModelId: "vm", viewModelName: "Board" }]);
+  return t;
+}
+const saveOwner = (t, ownerRest = 0) => t.store.save("F__Op2arm", JSON.stringify({ rig: "Op2arm", file: "F", kind: "sliders", drive: "script", flat: true, vmId: "vm", artboardId: "A",
+  addedProps: ["Op2arm_s1", "Op2arm_p0"], script: "poser Op2arm", scriptLanguage: "luau", poseInputs: ["Op2arm_s1"], sliders: ["Op2arm_s1"], allowNegative: false,
+  tracks: [{ objectId: "o2", propertyKey: 13, propertyName: "x", keys: [{ frame: 0, value: ownerRest }, { frame: 1, value: 5 }] }], binds: [] }));
+const bindNum = (rig, onBound) => rig.bindSliders({ artboardId: "A", artboardName: "Board", timelineId: "T1", rig: "num", poses: 2, inputs: [], drive: "script", allowNegative: false, removeKeys: false, selectedOnly: true, onBound });
+const boundIds = calls => made(calls, "viewmodel_editor", "databind").flatMap(c => c.args.data.databind.bindings.map(b => b.objectId));
+
+
+const vmNames = t => t.vm.viewModelProperties.map(p => p.name);
+const deletedNames = (t, names) => made(t.calls, "delete_objects").flatMap(c => c.args.objectIds)
+  .filter(id => names.some(n => t.vm.viewModelProperties.find(p => p.name === n)?.id === id));
+
+test("a rig from before 3.4 unbinds in two steps, its nested view model last and alone", async () => {
+  const ed = editor();
+  await ed.store.save("F__old", JSON.stringify({ rig: "old", file: "F", kind: "sliders", drive: "script", vmId: "vm", artboardId: "A", tracks: [],
+    nestedPropId: "np", poseVmId: "pv", script: "poser old", scriptLanguage: "luau", made: { placement: null } }));
+  const rig = createRig(ed.mcp, () => {}, ed.store);
+  const first = await rig.unbind((await rig.manifests())[0]);
+  assert.equal(first.cleanupPending, true);
+  assert.ok(!made(ed.calls, "delete_objects").some(c => c.args.objectIds.includes("np") || c.args.objectIds.includes("pv")));
+  const left = (await rig.manifests())[0];
+  assert.deepEqual(left.cleanup, { nestedPropId: "np", poseVmId: "pv" });
+  ed.calls.length = 0;
+  const second = await rig.unbind(left);
+  assert.equal(second.cleaned, true);
+  assert.deepEqual(made(ed.calls, "select_objects")[0].args.objectIds, []);
+  const del = made(ed.calls, "delete_objects").map(c => c.args.objectIds);
+  assert.ok(del.some(d => d.includes("np") && d.includes("pv")));
+  assert.equal((await rig.manifests()).length, 0);
+});
+
+test("a double bind asks, offering Share when the owner is a One-script NumInput rig", async () => {
+  const t = shareEditor();
+  await saveOwner(t);
+  await assert.rejects(bindNum(t.rig, "ask"), e => e.choice?.count === 1 && e.choice.shareable === 1 && e.choice.owners[0] === "Op2arm");
+  assert.equal(made(t.calls, "manage_scripts").length, 0);
+});
+
+test("Skip binds the rest and leaves the bound property to the other rig", async () => {
+  const t = shareEditor();
+  await saveOwner(t);
+  const m = await bindNum(t.rig, "skip");
+  assert.deepEqual(m.tracks.map(x => x.objectId), ["o"]);
+  assert.equal(m.skipped, 1);
+  assert.deepEqual(boundIds(t.calls), ["o"]);
+  assert.ok(!t.texts["poser Op2arm"].includes("rig = \"num\""));
+});
+
+test("a share whose rest value differs is skipped and counted", async () => {
+  const t = shareEditor();
+  await saveOwner(t, 3);
+  const m = await bindNum(t.rig, "share");
+  assert.equal(m.shared, 0);
+  assert.equal(m.restDiffers, 1);
+  assert.deepEqual(m.tracks.map(x => x.objectId), ["o"]);
+});
+
+test("an owner with a guest can't be unbound; the guest's Unbind rewrites the owner before its numbers go", async () => {
+  const t = shareEditor();
+  await saveOwner(t);
+  await bindNum(t.rig, "share");
+  const owner = (await t.rig.manifests()).find(x => x.rig === "Op2arm");
+  await assert.rejects(t.rig.unbind(owner), /"num" adds to properties this rig drives/);
+  const shareId = t.vm.viewModelProperties.find(p => p.name === "num_to_Op2arm_0").id;
+  t.calls.length = 0;
+  await t.rig.unbind((await t.rig.manifests()).find(x => x.rig === "num"));
+  const order = t.calls.map(c => (c.tool === "text_editor" && c.args.path === "poser Op2arm" && c.args.command !== "view" ? "owner"
+    : c.tool === "delete_objects" && c.args.objectIds.includes(shareId) ? "numbers" : "")).filter(Boolean);
+  assert.deepEqual(order.slice(0, 2), ["owner", "numbers"]);
+  assert.ok(!t.texts["poser Op2arm"].includes("rig = \"num\""));
+  assert.deepEqual((await t.rig.manifests()).find(x => x.rig === "Op2arm").guests, []);
+});
+
+test("keys on a joystick's handle are never posed properties", async () => {
+  const keys = [0, 1, 2, 3, 4].flatMap(frame => [
+    { objectId: "o", propertyKey: 13, propertyName: "x", frame, type: "double", value: frame * 10, keyframeId: `o${frame}` },
+    { objectId: "J", propertyKey: 299, propertyName: "x", frame, type: "double", value: frame / 4, keyframeId: `j${frame}` }]);
+  const t = scriptEditor([{ id: "o" }, { id: "J" }], { animation_editor: a => (a.command === "queryKeyFrames" ? { keyframes: { T1: keys } } : undefined) });
+  const m = await t.rig.bindJoystickScript({ artboardId: "A", artboardName: "Board", timelineId: "T1", order: { L: 1, R: 2, U: 3, D: 4 }, rig: "look", joystickId: "J", removeKeys: false, bias: {}, selectedOnly: false });
+  assert.deepEqual(m.tracks.map(x => x.objectId), ["o"]);
+});
+
+test("a failed Formula joystick bind undoes everything it made", async () => {
+  let probes = 0;
+  const ed = editor({ query_objects: a => (a.objectIds.length === 200 && ++probes > 1 ? { objects: [] } : undefined) });
+  const rig = createRig(ed.mcp, () => {}, ed.store);
+  const err = await rig.bindJoystick({ artboardId: "A", artboardName: "Board", timelineId: "T1", order: { L: 1, R: 2, U: 3, D: 4 }, rig: "look", joystickId: "J", removeKeys: false, bias: {}, selectedOnly: false }).catch(e => e);
+  assert.match(String(err.message), /but found \d+ bind objects/);
+  assert.equal(err.rolledBack, true);
+  const deleted = made(ed.calls, "delete_objects").flatMap(c => c.args.objectIds);
+  assert.ok(deleted.includes("tl poser look X") && deleted.includes("tl poser look Y"), "timelines");
+  const numberIds = ed.vm.viewModelProperties.filter(p => /^look_/.test(p.name)).map(p => p.id);
+  assert.ok(numberIds.every(id => deleted.includes(id)), "numbers");
+});
+
+const createdVm = (t, name) => made(t.calls, "viewmodel_editor", "createViewModels").flatMap(c => c.args.data.createViewModels.viewModels).find(v => v.name === name);
+
+test("a script NumInput makes its nested view model, fast, and records it", async () => {
+  const t = scriptEditor([{ id: "o" }]);
+  const m = await scriptNumInput(t.rig);
+  assert.deepEqual(createdVm(t, "poser num").viewModelProperties.map(p => p.name), ["p0"]);
+  assert.ok(m.poseVmId && m.nestedPropId && !m.flat);
+  assert.match(t.texts["poser num"], /local OUT: \{ string \} = \{ "p0" \}/);
+});
+
+test("a failed script bind undoes everything but its nested view model, which waits for a reload", async () => {
+  const t = scriptEditor([{ id: "o" }], { query_objects: a => (a.objectIds.length === 200 ? { objects: [] } : undefined) });
+  const err = await scriptNumInput(t.rig).catch(e => e);
+  assert.match(err.message, /found 0 bind objects/);
+  assert.equal(err.rolledBack, true);
+  const left = (await t.rig.manifests()).find(m => m.rig === "num");
+  assert.equal(left.cleanup.poseVmId, "v poser num");
+  const deleted = made(t.calls, "delete_objects").flatMap(c => c.args.objectIds);
+  assert.ok(!deleted.includes("v poser num") && !deleted.includes(left.cleanup.nestedPropId));
+});
+
+test("a nested rig can't be rebound under its name until it's unbound", async () => {
+  const ed = editor();
+  await ed.store.save("F__num", JSON.stringify({ rig: "num", file: "F", kind: "sliders", drive: "script", vmId: "vm", tracks: [], nestedPropId: "np", poseVmId: "pv" }));
+  const rig = createRig(ed.mcp, () => {}, ed.store);
+  await assert.rejects(bindNumInput(rig), /has a nested view model.*two clicks/);
+});
+
+test("a leftover poser view model with no record is refused before anything is made", async () => {
+  const t = scriptEditor([{ id: "o" }], { viewmodel_editor: a => (a.command === "listViewModels" ? { viewModels: [t.vm, { id: "old", name: "poser num", viewModelProperties: [] }] } : undefined) });
+  await assert.rejects(scriptNumInput(t.rig), /"poser num" is left from an earlier bind/);
+  assert.equal(made(t.calls, "manage_scripts").length, 0);
+});
+
+test("Share: the contributor's part is a root number <rig>_to_<owner>_<n>, and a flat owner adds it", async () => {
+  const t = shareEditor();
+  await saveOwner(t);
+  const m = await bindNum(t.rig, "share");
+  assert.equal(m.shared, 1);
+  assert.deepEqual(boundIds(t.calls), ["o"]);
+  assert.ok(vmNames(t).includes("num_to_Op2arm_0"));
+  assert.match(t.texts["poser num"], /local OUT: \{ string \} = \{ "p0", "num_to_Op2arm_0" \}/);
+  assert.match(t.texts["poser Op2arm"], /local NESTED = false/);
+  assert.match(t.texts["poser Op2arm"], /\{ rig = "num", props = \{ 0 \} \},/);
+});
+
+test("Share works with a nested owner too (rigs bound before 3.4)", async () => {
+  const t = shareEditor();
+  t.setBinds([{ objectId: "o2", propertyKey: 13, property: "x", objectName: "vertex", viewModelPropertyName: "p0", viewModelId: "ownerVm", viewModelName: "poser Op2arm" }]);
+  await t.store.save("F__Op2arm", JSON.stringify({ rig: "Op2arm", file: "F", kind: "sliders", drive: "script", vmId: "vm", artboardId: "A",
+    poseVmId: "ownerVm", nestedPropId: "ownerNest", script: "poser Op2arm", scriptLanguage: "luau", poseInputs: ["Op2arm_s1"], sliders: ["Op2arm_s1"], allowNegative: false,
+    tracks: [{ objectId: "o2", propertyKey: 13, propertyName: "x", keys: [{ frame: 0, value: 0 }, { frame: 1, value: 5 }] }], binds: [] }));
+  const m = await bindNum(t.rig, "share");
+  assert.equal(m.shared, 1);
+  assert.match(t.texts["poser Op2arm"], /local NESTED = true/);
+  assert.match(t.texts["poser Op2arm"], /\{ rig = "num", props = \{ 0 \} \},/);
 });

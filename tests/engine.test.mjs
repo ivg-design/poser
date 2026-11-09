@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   tracksFrom, sample, poseValues, flatTracks, joystickFormula, sliderFormula, switchFormula,
   easeCubic, mirrorCubic, factorKeys, mirrorVertices, ORDERS, safeName, poseScript,
-  sliderInputs, axisFormula, axisRest, connectionTimeline, itemSpots, numInputScriptLuau, togglerScriptLuau,
+  sliderInputs, axisFormula, axisRest, connectionTimeline, itemSpots, numInputScriptLuau, togglerScriptLuau, numInputOuts, poseScriptLuau,
 } from "../ui/engine.js";
 
 const rows = [
@@ -148,13 +148,36 @@ test("a one-axis toggler formula reads only that axis and picks the nearest", ()
 
 test("NumInput and Toggler scripts carry their inputs and values, with no --!strict", () => {
   const n = numInputScriptLuau("num", ["openness", "num_s2"], [{ values: [1, 11, 21] }, { values: [2, 2, 5] }], false);
-  assert.match(n, /local INPUTS = \{ "openness", "num_s2" \}/);
-  assert.match(n, /local ORIGIN = \{ 1, 2 \}/);
+  assert.match(n, /local INPUTS: \{ string \} = \{ "openness", "num_s2" \}/);
+  assert.match(n, /local OUT: \{ string \} = \{ "p0", "p1" \}/);
+  assert.match(n, /local BASE: \{ number \} = \{ 1, 2 \}/);
   assert.match(n, /\{ 10, 0 \},\n  \{ 20, 3 \},/);
   assert.match(n, /math\.max\(0, input\(self, j\)\)/);
   assert.ok(!numInputScriptLuau("num", ["a"], [{ values: [0, 1] }], true).includes("math.max"));
   const t = togglerScriptLuau("t", [{ x: -1, y: 0 }, { x: 1, y: 0 }], { x: "t_x", y: null });
-  assert.match(t, /local INPUTS = \{ "t_x" \}/);
+  assert.match(t, /local INPUTS: \{ string \} = \{ "t_x" \}/);
   assert.match(t, /\{ -1, 1 \},/);
+  assert.ok(!t.includes("local BASE"));
   assert.ok(![n, t].some(s => s.includes("--!strict")));
+});
+
+
+
+test("script rigs: nested outputs by default, flat for 3.4 rigs, shares always root numbers", () => {
+  const rows = [{ values: [5, 15] }, { values: [2, 6], share: { owner: "Op2arm", n: 17 } }, { values: [0, 1] }];
+  assert.deepEqual(numInputOuts("breath", rows), [{ name: "p0", base: 5, root: false }, { name: "breath_to_Op2arm_17", base: 0, root: true }, { name: "p1", base: 0, root: false }]);
+  assert.deepEqual(numInputOuts("breath", rows, false).map(o => o.name), ["breath_p0", "breath_to_Op2arm_17", "breath_p1"]);
+  const c = numInputScriptLuau("breath", ["breath_s1"], rows, false);
+  assert.match(c, /local NESTED = true/);
+  assert.match(c, /local ROOT: \{ boolean \} = \{ false, true, false \}/);
+  assert.match(c, /vm:getViewModel\(RIG\)/);
+  const o = numInputScriptLuau("Op2arm", ["Op2arm_s1"], [{ values: [0, 1] }], false, [{ rig: "breath", props: [16, 17] }]);
+  assert.match(o, /\{ rig = "breath", props = \{ 16, 17 \} \},/);
+  assert.match(o, /if NESTED then "p" else RIG \.\. "_p"/);
+  assert.match(o, /context:markNeedsUpdate\(\)/);
+  assert.match(o, /self\.vm = vm/);
+  assert.match(numInputScriptLuau("f", ["f_s1"], [{ values: [0, 1] }], false, [], false), /local NESTED = false/);
+  assert.match(poseScriptLuau("look", [{ values: [0, 1, 2, 3, 4] }], ORDERS["L, R, U, D"], {}), /vm:getViewModel\(RIG\)/);
+  assert.match(poseScriptLuau("look", [{ values: [0, 1, 2, 3, 4] }], ORDERS["L, R, U, D"], {}, false), /vm:getNumber\(RIG \.\. "_x"\)/);
+  assert.match(poseScript("look", [{ values: [0, 1, 2, 3, 4] }], ORDERS["L, R, U, D"], {}), /getViewModel\(RIG\)/);
 });

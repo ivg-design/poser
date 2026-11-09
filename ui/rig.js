@@ -55,9 +55,14 @@ export function createRig(mcp, log = () => {}, store) {
     return scope;
   }
 
+  // A joystick's handle is a control, never a pose. Moving one while a timeline is open keys it, and
+  // a rig must not bind its own joystick as a posed property.
+  const JOYSTICK_KEYS = new Set([299, 300, 301, 302]);
+
   async function poseTracks(timelineId, scope) {
     const r = await mcp("animation_editor", { command: "queryKeyFrames", data: { queryKeyFrames: { animationIds: [timelineId] } } });
     const tracks = E.tracksFrom(r.keyframes?.[timelineId] || []);
+    for (const k of [...tracks.keys()]) if (JOYSTICK_KEYS.has(tracks.get(k).propertyKey)) tracks.delete(k);
     if (scope) for (const k of [...tracks.keys()]) if (!scope.has(tracks.get(k).objectId)) tracks.delete(k);
     return tracks;
   }
@@ -90,6 +95,37 @@ export function createRig(mcp, log = () => {}, store) {
     const byName = Object.fromEntries((fresh.viewModelProperties || []).map(p => [p.name, p.id]));
     for (const n of names) if (!byName[n]) throw new Error(`View model property ${n} was not created.`);
     return { vm: fresh, ids: byName, added: missing };
+  }
+
+  // A script rig's numbers on the artboard's view model, each instance starting at the value given
+  // (its rest value), so nothing jumps before the script runs. Every name is the rig's own, so
+  // Unbind deletes them all. Since 3.4 rigs make no nested view model: Rive 0.9.517 crashed deleting those.
+  async function rigNumbers(vm, values) {
+    const names = Object.keys(values);
+    if (names.length > 100) log(`Adding ${names.length} numbers to "${vm.name}"… a big rig can take a minute.`);
+    const r = await ensureNumbers(vm, names);
+    const sets = {};
+    for (const inst of await listInstances(r.vm.id))
+      for (const p of inst.viewModelProperties || []) if (p.name in values) sets[p.id] = { 575: values[p.name] };
+    for (const part of chunks(Object.keys(sets), 400))
+      await mcp("set_property_values", { propertyValues: Object.fromEntries(part.map(id => [id, sets[id]])) });
+    return { vm: r.vm, ids: r.ids, names };
+  }
+
+  // deletes what's there; one id that's already gone can fail a batch, so the rest go one by one
+  async function deleteAll(ids) {
+    let failed = 0;
+    for (const part of chunks(ids.filter(Boolean), 400)) {
+      try { await mcp("delete_objects", { objectIds: part }); }
+      catch { for (const id of part) { try { await mcp("delete_objects", { objectIds: [id] }); } catch { failed++; } } }
+    }
+    return failed;
+  }
+
+  async function deleteNumbers(vmId, names) {
+    log("Undoing: removing what this bind made…");
+    const vm = ((await mcp("viewmodel_editor", { command: "listViewModels" })).viewModels || []).find(v => v.id === vmId);
+    return deleteAll((vm?.viewModelProperties || []).filter(p => names.includes(p.name)).map(p => p.id));
   }
 
   // formula converters, created in chunks and found again by their unique names
@@ -128,8 +164,88 @@ export function createRig(mcp, log = () => {}, store) {
       return new Error(`"${d.objectName}" ${d.property}${more(taken.length)} still ${taken.length > 1 ? "have binds" : "has a bind"} left from a removed rig: the editor keeps removed binds until the file is reloaded. Reload the file (Cmd+R), then bind again. If it is still listed after the reload, remove it in the editor.`);
     }
     const d = live[0];
-    return new Error(`"${d.objectName}" ${d.property} is still bound to ${d.viewModelPropertyName}${more(live.length)}. Remove that bind in the editor, or ${other}.`);
+    return new Error(`"${d.objectName}" ${d.property} is still bound to ${d.viewModelName ? `${d.viewModelName}/` : ""}${d.viewModelPropertyName}${more(live.length)}. Remove that bind in the editor, or ${other}.`);
   };
+  // Properties another rig still binds are refused before anything is made: on the script drive a
+  // refusal after the nested view model exists means deleting it again, which is what crashed Rive.
+  async function refuseBound(pairs, other) {
+    const want = new Set(pairs.map(pair));
+    const taken = (await allBinds()).filter(d => want.has(pair(d)));
+    if (taken.length) throw boundError(taken, other);
+  }
+  const OTHER_RIG = "unbind the rig that binds them first (rig names are case-sensitive)";
+  const SETTLE_MS = 400;   // a pause for the editor to catch up after rewriting a script
+
+  // Live binds on these properties from another rig. Leftovers of removed binds mean a reload, not a
+  // choice. One is shareable when its owner is a One-script NumInput rig (its number p<n>).
+  async function boundOf(pairs, rig) {
+    if (!pairs.length) return [];
+    const want = new Set(pairs.map(pair));
+    const taken = (await allBinds()).filter(d => want.has(pair(d)));
+    const live = taken.filter(d => !d.unresolved && d.viewModelPropertyName && !unbound.has(pair(d)));
+    if (taken.length && !live.length) throw boundError(taken, OTHER_RIG);
+    if (!live.length) return [];
+    const owners = (await manifests()).filter(m => m.kind === "sliders" && m.drive === "script" && !m.cleanup && m.rig !== rig && m.script);
+    return live.map(d => {
+      for (const o of owners) {
+        const n = o.flat
+          ? (d.viewModelId === o.vmId ? new RegExp(`^${o.rig}_p(\\d+)$`).exec(d.viewModelPropertyName)?.[1] : undefined)
+          : (d.viewModelId === o.poseVmId ? /^p(\d+)$/.exec(d.viewModelPropertyName)?.[1] : undefined);
+        if (n !== undefined) return { d, owner: o, n: +n };
+      }
+      return { d, owner: null, n: null };
+    });
+  }
+
+  // The panel turns this into a choice: share them with the rig that owns them (One-script NumInput
+  // rigs on both sides), skip them and bind the rest, or cancel.
+  function boundChoice(bound, canShare) {
+    const e = boundError(bound.map(b => b.d), "choose what to do below");
+    const owners = [...new Set(bound.filter(b => b.owner).map(b => b.owner.rig))];
+    e.choice = { count: bound.length, shareable: canShare ? bound.filter(b => b.owner).length : 0, owners: canShare ? owners : [] };
+    return e;
+  }
+  const NOTHING_LEFT = "Every posed property is already bound by another rig, so nothing is left to bind.";
+
+  // a share is only right when both rigs rest at the same value
+  function sameRest(owner, r) {
+    const t = (owner.tracks || []).find(x => x.objectId === r.t.objectId && x.propertyKey === r.t.propertyKey);
+    if (!t) return false;
+    const a = E.sample(t.keys, 0), b = r.values[0];
+    return Math.abs(a - b) <= 1e-4 * Math.max(1, Math.abs(a));
+  }
+
+  // What happens to posed properties another rig already binds: "ask" (the panel offers the choice),
+  // "share" (with their owner, when it can) or "skip". Shared rows carry { owner, n }.
+  async function settleBound(rows, rig, onBound, canShare) {
+    const bound = await boundOf(rows.map(r => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey })), rig);
+    if (!bound.length) return { rows, shared: 0, skipped: 0, restDiffers: 0 };
+    if (onBound === "ask") throw boundChoice(bound, canShare);
+    const byPair = new Map(bound.map(b => [pair(b.d), b]));
+    const kept = [];
+    let restDiffers = 0;
+    for (const r of rows) {
+      const b = byPair.get(pair({ objectId: r.t.objectId, propertyKey: r.t.propertyKey }));
+      if (!b) { kept.push(r); continue; }
+      if (onBound === "share" && canShare && b.owner) {
+        if (sameRest(b.owner, r)) { kept.push({ ...r, share: { owner: b.owner.rig, n: b.n } }); continue; }
+        restDiffers++;
+      }
+    }
+    if (!kept.length) throw new Error(NOTHING_LEFT);
+    return { rows: kept, shared: kept.filter(r => r.share).length, skipped: rows.length - kept.length, restDiffers };
+  }
+
+  // An owner adds its guests' shares. Its script is rewritten whenever its guests change.
+  async function rewriteOwner(owner) {
+    const names = owner.poseInputs || owner.sliders;
+    const frames = Array.from({ length: names.length + 1 }, (_, i) => i);
+    const rows = owner.tracks.map(t => ({ values: E.poseValues(t, frames), ...(t.share ? { share: t.share } : {}) }));
+    await setLanguage(owner.script, "luau");
+    await writeScript(owner.script, E.numInputScriptLuau(owner.rig, names, rows, owner.allowNegative, owner.guests || [], !owner.flat));
+    await saveManifest(owner);
+  }
+
   async function bind(vmId, bindings, artboardId) {
     const want = new Set(bindings.map(pair));
     const taken = (await allBinds()).filter(d => want.has(pair(d)));
@@ -293,12 +409,20 @@ export function createRig(mcp, log = () => {}, store) {
 
   // a rigged timeline's pose keys live in its manifest, so binding it again finds nothing:
   // the same rig name rebinds (unbind restores the keys first), another rig name is refused
+  const nestedFirst = rig => new Error(`"${rig}" has a nested view model. Unbind it on its tab first (two clicks, with a reload between), then bind again.`);
+  // the same refusal as claim(), before a script or view model is made
+  async function claimable(file, rig) {
+    const same = (await store.list()).map(j => JSON.parse(j)).find(m => m.file === file && m.rig === rig);
+    if (same && (same.nestedPropId || same.cleanup) && !same.flat) throw nestedFirst(rig);
+  }
+
   async function claim(file, timelineId, rig, kind) {
     const ms = (await store.list()).map(j => JSON.parse(j)).filter(m => m.file === file);
     const other = timelineId && ms.find(m => m.rig !== rig && m.timelineId === timelineId);
     if (other) throw new Error(`That timeline is already rigged as "${other.rig}". Use rig name "${other.rig}" to rebind it, or unbind it on its tab.`);
     const same = ms.find(m => m.rig === rig);
     if (same && same.kind !== kind) throw new Error(`The name "${rig}" is taken by a ${KIND_NAME[same.kind] || same.kind} rig. Use another rig name, or unbind that rig on its tab.`);
+    if (same && (same.nestedPropId || same.cleanup) && !same.flat) throw nestedFirst(rig);
     if (same) {
       log(`Rig "${rig}" exists: unbinding it first.`);
       const r = await unbind(same);
@@ -402,10 +526,14 @@ export function createRig(mcp, log = () => {}, store) {
 
   // A refused bind should make nothing. A rig of this name gets its keys back when claim() unbinds
   // it, so an empty timeline can only be refused when there's no such rig.
-  async function checkPoses(file, rig, timelineId, scope, isPosed) {
+  async function checkPoses(file, rig, timelineId, scope, isPosed, onBound = "ask", canShare = false) {
     if ((await store.list()).map(j => JSON.parse(j)).some(m => m.file === file && m.rig === rig)) return;
     const tracks = await poseTracks(timelineId, scope);
-    if (![...tracks.values()].some(isPosed)) throw noChanges(tracks, scope);
+    const posed = [...tracks.values()].filter(isPosed);
+    if (!posed.length) throw noChanges(tracks, scope);
+    const bound = await boundOf(posed.map(t => ({ objectId: t.objectId, propertyKey: t.propertyKey })), rig);
+    if (bound.length && onBound === "ask") throw boundChoice(bound, canShare);
+    if (bound.length === posed.length && !(onBound === "share" && canShare && bound.some(b => b.owner))) throw new Error(NOTHING_LEFT);
   }
 
   function noChanges(tracks, scope) {
@@ -417,7 +545,7 @@ export function createRig(mcp, log = () => {}, store) {
 
   // ------------------------------------------------------------ joystick
 
-  async function bindJoystick({ artboardId, artboardName, timelineId, order, rig, joystickId, removeKeys, bias, selectedOnly }) {
+  async function bindJoystick({ artboardId, artboardName, timelineId, order, rig, joystickId, removeKeys, bias, selectedOnly, onBound = "ask" }) {
     rig = E.safeName(rig);
     const file = await fileKey();
     const scope = selectedOnly ? await bindScope() : null;   // before anything can change the selection
@@ -425,50 +553,64 @@ export function createRig(mcp, log = () => {}, store) {
     await joystickFree(joystickId, ["x", "y"], rig);
     const tracks = await poseTracks(timelineId, scope);
     const frames = [0, 1, 2, 3, 4];
-    const rows = [];
+    let rows = [];
     for (const t of tracks.values()) {
       const values = E.poseValues(t, frames);
       const formula = E.joystickFormula("__VM__", rig, values, order);
       if (formula) rows.push({ t, values, formula });
     }
     if (!rows.length) throw noChanges(tracks, scope);
+    const settled = await settleBound(rows, rig, onBound, false);
+    rows = settled.rows;
     log(`${rows.length} properties to bind.`);
 
     let vm = await artboardViewModel(artboardId, artboardName);
     const names = ["fL", "fR", "fU", "fD", "x", "y"].map(n => `${rig}_${n}`);
     const { vm: vm2, ids, added } = await ensureNumbers(vm, names);
     vm = vm2;
+    // everything below is undone if a step fails, so a refused bind leaves no half-made rig
+    let group = null;
+    const nodes = {}, tl = {};
+    let convIds = [], controlBinds = [], propBinds = [];
+    try {
+      // factor nodes under one group, keyed by two timelines the joystick scrubs
+      group = (await mcp("group_editor", { name: `poser ${rig}`, parentId: artboardId })).group;
+      for (const d of E.DIRECTIONS) {
+        nodes[d] = (await mcp("group_editor", { name: `${rig} f${d}`, parentId: group.id })).group?.id;
+        if (!nodes[d]) throw new Error(`Factor node f${d} was not created.`);
+      }
+      const tlNames = { X: `poser ${rig} X`, Y: `poser ${rig} Y` };
+      const madeTl = (await mcp("animation_editor", { command: "createLinearAnimations", data: { createLinearAnimations: {
+        linearAnimations: Object.values(tlNames).map(name => ({ name, duration: E.FACTOR_FRAMES / 60 })) } } })).animations || [];
+      tl.X = madeTl.find(a => a.name === tlNames.X)?.id;
+      tl.Y = madeTl.find(a => a.name === tlNames.Y)?.id;
+      if (!tl.X || !tl.Y) throw new Error("Factor timelines were not created.");
+      for (const axis of ["X", "Y"]) {
+        await mcp("animation_editor", { command: "modifyKeyFrames", data: { modifyKeyFrames: { animationId: tl[axis], add: E.factorKeys(nodes, axis, bias) } } });
+      }
+      await mcp("set_property_values", { propertyValues: { [joystickId]: { 301: tl.X, 302: tl.Y } } });
 
-    // factor nodes under one group, keyed by two timelines the joystick scrubs
-    const group = (await mcp("group_editor", { name: `poser ${rig}`, parentId: artboardId })).group;
-    const nodes = {};
-    for (const d of E.DIRECTIONS) {
-      nodes[d] = (await mcp("group_editor", { name: `${rig} f${d}`, parentId: group.id })).group?.id;
-      if (!nodes[d]) throw new Error(`Factor node f${d} was not created.`);
+      // factors and the raw joystick position flow into the view model
+      const factorBinds = E.DIRECTIONS.map(d => ({ objectId: nodes[d], propertyKey: 13, viewModelPropertyId: ids[`${rig}_f${d}`] }));
+      const joyBinds = [{ objectId: joystickId, propertyKey: 299, viewModelPropertyId: ids[`${rig}_x`] },
+                        { objectId: joystickId, propertyKey: 300, viewModelPropertyId: ids[`${rig}_y`] }];
+      controlBinds = await bind(vm.id, [...factorBinds, ...joyBinds], artboardId);
+      await toSource([...factorBinds, ...joyBinds].map(({ objectId, propertyKey }) => ({ objectId, propertyKey })));
+
+      // one formula converter per posed property
+      const conv = rows.map(r => ({ name: E.converterName(rig, r.t.objectId, r.t.propertyName), formula: r.formula.replaceAll("__VM__", vm.name) }));
+      log(`Creating ${conv.length} converters…`);
+      convIds = await makeConverters(conv);
+      log("Binding properties…");
+      propBinds = await bind(vm.id, rows.map((r, i) => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, viewModelPropertyId: ids[`${rig}_fR`], converterId: convIds[i] })), artboardId);
+    } catch (e) {
+      log("Undoing: removing what this bind made…");
+      await deleteAll([...controlBinds, ...propBinds, ...convIds]);
+      await deleteAll([tl.X, tl.Y, ...Object.values(nodes), group?.id]);   // deleting the timelines clears the joystick's axes
+      if (added.length) await deleteNumbers(vm.id, added).catch(() => {});
+      e.rolledBack = true;
+      throw e;
     }
-    const tlNames = { X: `poser ${rig} X`, Y: `poser ${rig} Y` };
-    const made = (await mcp("animation_editor", { command: "createLinearAnimations", data: { createLinearAnimations: {
-      linearAnimations: Object.values(tlNames).map(name => ({ name, duration: E.FACTOR_FRAMES / 60 })) } } })).animations || [];
-    const tl = { X: made.find(a => a.name === tlNames.X)?.id, Y: made.find(a => a.name === tlNames.Y)?.id };
-    if (!tl.X || !tl.Y) throw new Error("Factor timelines were not created.");
-    for (const axis of ["X", "Y"]) {
-      await mcp("animation_editor", { command: "modifyKeyFrames", data: { modifyKeyFrames: { animationId: tl[axis], add: E.factorKeys(nodes, axis, bias) } } });
-    }
-    await mcp("set_property_values", { propertyValues: { [joystickId]: { 301: tl.X, 302: tl.Y } } });
-
-    // factors and the raw joystick position flow into the view model
-    const factorBinds = E.DIRECTIONS.map(d => ({ objectId: nodes[d], propertyKey: 13, viewModelPropertyId: ids[`${rig}_f${d}`] }));
-    const joyBinds = [{ objectId: joystickId, propertyKey: 299, viewModelPropertyId: ids[`${rig}_x`] },
-                      { objectId: joystickId, propertyKey: 300, viewModelPropertyId: ids[`${rig}_y`] }];
-    const controlBinds = await bind(vm.id, [...factorBinds, ...joyBinds], artboardId);
-    await toSource([...factorBinds, ...joyBinds].map(({ objectId, propertyKey }) => ({ objectId, propertyKey })));
-
-    // one formula converter per posed property
-    const conv = rows.map(r => ({ name: E.converterName(rig, r.t.objectId, r.t.propertyName), formula: r.formula.replaceAll("__VM__", vm.name) }));
-    log(`Creating ${conv.length} converters…`);
-    const convIds = await makeConverters(conv);
-    log("Binding properties…");
-    const propBinds = await bind(vm.id, rows.map((r, i) => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, viewModelPropertyId: ids[`${rig}_fR`], converterId: convIds[i] })), artboardId);
 
     const manifest = {
       kind: "joystick", version: 1, file, rig, artboardId, timelineId, ...await timelineInfo(timelineId), order, joystickId, vmId: vm.id, addedProps: added,
@@ -597,29 +739,41 @@ export function createRig(mcp, log = () => {}, store) {
     return wrong ? `Reload the file in the Rive editor (Cmd+R) so it compiles "${name}" as ${language === "luau" ? "Luau" : "AnimaScript"}.` : "";
   }
 
-  const scriptSource = (language, rig, rows, order, bias) =>
-    (language === "luau" ? E.poseScriptLuau : E.poseScript)(rig, rows, order, bias);
+  const scriptSource = (language, rig, rows, order, bias, nested = true) =>
+    (language === "luau" ? E.poseScriptLuau : E.poseScript)(rig, rows, order, bias, nested);
 
   const listVMs = async () => (await mcp("viewmodel_editor", { command: "listViewModels" })).viewModels || [];
   const listInstances = async viewModelId => (await mcp("viewmodel_editor", { command: "listViewModelInstances",
     data: { listViewModelInstances: { viewModelId } } })).instances || [];
 
-  // `poser <rig>` view model (the control numbers, then p0…pN) with a Default instance, nested in the artboard's view
-  // model as `<rig>`, and every instance of the artboard's view model pointed at it
+  // A leftover `poser <rig>` view model (or a <rig> property that nests one) with no record would be
+  // deleted mid-bind, and deleting view-model data before a reload is what crashes Rive. So it's
+  // refused before anything is made; the user deletes it in the Data panel, or picks another name.
+  async function refuseStaleNested(rig, artboardId) {
+    const name = E.scriptVmName(rig);
+    const recorded = new Set((await manifests()).flatMap(m => [m.poseVmId, m.cleanup?.poseVmId].filter(Boolean)));
+    const vms = await listVMs();
+    const stale = vms.find(v => v.name === name && !recorded.has(v.id));
+    const q = await mcp("query_property_values", { propertyKeys: { [artboardId]: [583] } });
+    const board = vms.find(v => v.id === q.values?.[artboardId]?.["583"]);
+    const prop = (board?.viewModelProperties || []).find(p => p.name === rig && p.propertyType === "viewModel");
+    if (stale || prop) throw new Error(`"${name}" is left from an earlier bind of "${rig}", with no record. Delete it in the Data panel`
+      + `${prop ? ` (the "${rig}" property on "${board.name}"${stale ? ` and the "${name}" view model` : ""})` : ""}, or use another rig name.`);
+  }
+
+  // `poser <rig>` view model (the control numbers, then p0…pN) with a Default instance, nested in the
+  // artboard's view model as `<rig>`, and every instance of the artboard's view model pointed at it
   async function poseViewModel(vm, rig, origins, controls = ["x", "y"]) {
     const name = E.scriptVmName(rig);
-    // a failed bind can leave these behind; a bound rig was already removed by claim()
-    const stale = (await listVMs()).filter(v => v.name === name).map(v => v.id);
-    const staleProp = (vm.viewModelProperties || []).filter(p => p.name === rig && p.propertyType === "viewModel").map(p => p.id);
-    if (stale.length || staleProp.length) await mcp("delete_objects", { objectIds: [...staleProp, ...stale] });
     const props = [...controls, ...origins.map((_, i) => `p${i}`)];
+    if (props.length > 100) log(`Creating the view model "${name}" with ${props.length} numbers…`);
     await mcp("viewmodel_editor", { command: "createViewModels", data: { createViewModels: { viewModels: [
       { name, viewModelProperties: props.map(n => ({ name: n, propertyType: "number" })) }] } } });
     const poses = (await listVMs()).find(v => v.name === name);
     if (!poses) throw new Error(`View model "${name}" was not created.`);
     const ids = Object.fromEntries((poses.viewModelProperties || []).map(p => [p.name, p.id]));
     for (const n of props) if (!ids[n]) throw new Error(`View model property ${n} was not created.`);
-    const value = n => n[0] === "p" ? String(origins[+n.slice(1)]) : "0";
+    const value = n => (/^p\d+$/.test(n) ? String(origins[+n.slice(1)]) : "0");
     await mcp("viewmodel_editor", { command: "createViewModelInstances", data: { createViewModelInstances: { viewModelId: poses.id,
       instances: [{ name: "Default", instanceProperties: props.map(n => ({ viewModelPropertyId: ids[n], propertyType: "number", value: value(n) })) }] } } });
     const made = await listInstances(poses.id);   // the editor adds an "Instance" of its own
@@ -637,23 +791,42 @@ export function createRig(mcp, log = () => {}, store) {
     return { poses, ids, nestedPropId: nestedProp.id, path: `${vm.name} -> ${rig}` };
   }
 
-  async function bindJoystickScript({ artboardId, artboardName, timelineId, order, rig, joystickId, removeKeys, bias, selectedOnly, language }) {
+  // A failed bind undoes what it made except its nested view model, which waits for a reload: this
+  // record lists it under "old view model left", and the next Unbind removes it.
+  async function leaveNested(kind, rig, file, vmId, artboardId, pv) {
+    await saveManifest({ kind, rig, file, version: 1, vmId, artboardId, drive: "script", tracks: [], items: [],
+      cleanup: { nestedPropId: pv.nestedPropId, poseVmId: pv.poses.id } });
+  }
+
+  const leftNote = rig => ` Poser left the view model "poser ${rig}" for after a reload: reload the file (Cmd+R), click Reloaded, then Unbind "${rig}" to remove it.`;
+
+  // the made script and its placement go with a failed bind (no view-model data in them)
+  const dropMadeScript = async script => {
+    const ids = [script.made?.placement];
+    if (script.made?.script) { try { ids.push((await scriptAsset(script.name)).id); } catch {} }
+    await deleteAll(ids);
+  };
+
+  async function bindJoystickScript({ artboardId, artboardName, timelineId, order, rig, joystickId, removeKeys, bias, selectedOnly, language, onBound = "ask" }) {
     rig = E.safeName(rig);
     const file = await fileKey();
     // making the rig script opens it in the editor, which drops the selection, so read that first
     const scope = selectedOnly ? await bindScope() : null;
-    await checkPoses(file, rig, timelineId, scope, t => E.joystickFormula("__VM__", rig, E.poseValues(t, [0, 1, 2, 3, 4]), order));
+    await checkPoses(file, rig, timelineId, scope, t => E.joystickFormula("__VM__", rig, E.poseValues(t, [0, 1, 2, 3, 4]), order), onBound, false);
+    await claimable(file, rig);
+    await refuseStaleNested(rig, artboardId);
     const script = await ensureScript(rig, artboardId);   // before claim unbinds an earlier rig
     if (language && language !== script.language) log(`This file runs ${script.language === "luau" ? "Luau" : "AnimaScript"} scripts, so the rig script is ${script.language === "luau" ? "Luau" : "AnimaScript"}.`);
     await claim(file, timelineId, rig, "joystick");
     await joystickFree(joystickId, ["x", "y"], rig);
     const tracks = await poseTracks(timelineId, scope);
-    const rows = [];
+    let rows = [];
     for (const t of tracks.values()) {
       const values = E.poseValues(t, [0, 1, 2, 3, 4]);
       if (E.joystickFormula("__VM__", rig, values, order)) rows.push({ t, values });
     }
     if (!rows.length) throw noChanges(tracks, scope);
+    rows = (await settleBound(rows, rig, onBound, false)).rows;
     log(`${rows.length} properties to bind.`);
 
     const vm = await artboardViewModel(artboardId, artboardName);
@@ -673,8 +846,13 @@ export function createRig(mcp, log = () => {}, store) {
       await writeScript(script.name, scriptSource(script.language, rig, rows, order, bias));
       note = await reloadHint(script.name, script.language);
     } catch (e) {
-      // leave the file as it was: no half-made rig
-      await mcp("delete_objects", { objectIds: [...made, pv.nestedPropId, pv.poses.id] }).catch(() => {});
+      // undo what it made; the nested view model waits for a reload (see leaveNested)
+      log("Undoing: removing what this bind made…");
+      await deleteAll(made);
+      await dropMadeScript(script);
+      await leaveNested("joystick", rig, file, vm.id, artboardId, pv);
+      e.message += leftNote(rig);
+      e.rolledBack = true;
       throw e;
     }
 
@@ -701,7 +879,7 @@ export function createRig(mcp, log = () => {}, store) {
       const rows = m.tracks.map(t => ({ values: E.poseValues(t, [0, 1, 2, 3, 4]) }));
       m.scriptLanguage = await fileLanguage();   // a rig bound in the wrong language heals here
       await setLanguage(m.script, m.scriptLanguage);
-      await writeScript(m.script, scriptSource(m.scriptLanguage, m.rig, rows, m.order, bias));
+      await writeScript(m.script, scriptSource(m.scriptLanguage, m.rig, rows, m.order, bias, !m.flat));
       m.bias = bias;
       await saveManifest(m);
       return;
@@ -723,51 +901,69 @@ export function createRig(mcp, log = () => {}, store) {
 
   // ------------------------------------------------------------ sliders
 
-  async function bindSliders({ artboardId, artboardName, timelineId, rig, poses, inputs = [], drive = "formula", allowNegative, removeKeys, selectedOnly }) {
+  async function bindSliders({ artboardId, artboardName, timelineId, rig, poses, inputs = [], drive = "formula", allowNegative, removeKeys, selectedOnly, onBound = "ask" }) {
     rig = E.safeName(rig);
     const file = await fileKey();
     const frames = Array.from({ length: poses + 1 }, (_, i) => i);
     const names = E.sliderInputs(rig, poses, inputs);
     // making the rig script opens it in the editor, which drops the selection, so read that first
     const scope = selectedOnly ? await bindScope() : null;
-    await checkPoses(file, rig, timelineId, scope, t => E.sliderFormula("__VM__", rig, E.poseValues(t, frames), allowNegative, names));
+    const canShare = drive === "script";
+    await checkPoses(file, rig, timelineId, scope, t => E.sliderFormula("__VM__", rig, E.poseValues(t, frames), allowNegative, names), onBound, canShare);
+    if (drive === "script") { await claimable(file, rig); await refuseStaleNested(rig, artboardId); }
     const script = drive === "script" ? await luauScript(rig, artboardId) : null;
     await claim(file, timelineId, rig, "sliders");
     const tracks = await poseTracks(timelineId, scope);
-    const rows = [];
+    let rows = [];
     for (const t of tracks.values()) {
       const values = E.poseValues(t, frames);
       const formula = E.sliderFormula("__VM__", rig, values, allowNegative, names);
       if (formula) rows.push({ t, values, formula });
     }
     if (!rows.length) throw noChanges(tracks, scope);
+    const settled = await settleBound(rows, rig, onBound, canShare);
+    rows = settled.rows;
+    const outs = E.numInputOuts(rig, rows, true);
     let vm = await artboardViewModel(artboardId, artboardName);
     const { vm: vm2, ids, added } = await ensureNumbers(vm, names);
     vm = vm2;
     const manifest = {
       kind: "sliders", drive, version: 1, file, rig, artboardId, timelineId, ...await timelineInfo(timelineId), vmId: vm.id, addedProps: added, sliders: [...new Set(names)], poseInputs: names, allowNegative,
-      tracks: rows.map(r => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, propertyName: r.t.propertyName,
-        keys: E.savedKeys(r.t) })),
+      tracks: rows.map((r, i) => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, propertyName: r.t.propertyName,
+        keys: E.savedKeys(r.t), out: outs[i].name, ...(r.share ? { share: r.share } : {}) })),
     };
+    const own = rows.filter(r => !r.share);
+    const shares = rows.filter(r => r.share).map(r => ({ ...r.share, objectId: r.t.objectId, propertyKey: r.t.propertyKey }));
+    if (shares.length) manifest.shares = shares;
     let note = "";
     if (script) {
-      const pv = await poseViewModel(vm, rig, rows.map(r => r.values[0]), []);
+      const shareOuts = outs.filter(o => o.root);
+      const nums = shareOuts.length ? await rigNumbers(vm, Object.fromEntries(shareOuts.map(o => [o.name, 0]))) : { names: [], ids: {}, vm };
+      vm = nums.vm;
+      const pv = await poseViewModel(vm, rig, own.map(r => r.values[0]), []);
       const made = [];
       try {
-        made.push(...await bind(pv.poses.id, rows.map((r, i) => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey,
-          viewModelPropertyId: pv.ids[`p${i}`], path: pv.path })), artboardId));
+        made.push(...await bind(pv.poses.id, rows.map((r, i) => (r.share ? null : { objectId: r.t.objectId, propertyKey: r.t.propertyKey,
+          viewModelPropertyId: pv.ids[outs[i].name], path: pv.path })).filter(Boolean), artboardId));
         await setLanguage(script.name, script.language);
-        await writeScript(script.name, E.numInputScriptLuau(rig, names, rows, allowNegative));
+        await writeScript(script.name, E.numInputScriptLuau(rig, names, rows, allowNegative, [], true));
         note = await reloadHint(script.name, script.language);
       } catch (e) {
-        await mcp("delete_objects", { objectIds: [...made, pv.nestedPropId, pv.poses.id] }).catch(() => {});
+        log("Undoing: removing what this bind made…");
+        await deleteAll(made);
+        if (nums.names.length) await deleteNumbers(vm.id, nums.names).catch(() => {});
+        if (added.length) await deleteNumbers(vm.id, added).catch(() => {});
+        await dropMadeScript(script);
+        await leaveNested("sliders", rig, file, vm.id, artboardId, pv);
+        e.message += leftNote(rig);
+        e.rolledBack = true;
         throw e;
       }
-      Object.assign(manifest, { binds: made, poseVmId: pv.poses.id, nestedPropId: pv.nestedPropId, script: script.name, scriptLanguage: script.language, made: script.made });
+      Object.assign(manifest, { binds: made, poseVmId: pv.poses.id, nestedPropId: pv.nestedPropId, addedProps: [...new Set([...added, ...nums.names])], script: script.name, scriptLanguage: script.language, made: script.made });
     } else {
       const convIds = await makeConverters(rows.map(r => ({ name: E.converterName(rig, r.t.objectId, r.t.propertyName), formula: r.formula.replaceAll("__VM__", vm.name) })));
       manifest.converters = convIds;
-      manifest.binds = await bind(vm.id, rows.map((r, i) => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, viewModelPropertyId: ids[names[0]], converterId: convIds[i] })), artboardId);
+      manifest.binds = await bind(vm.id, rows.map((r, i) => ({ objectId: r.t.objectId, propertyKey: r.t.propertyKey, viewModelPropertyId: ids[names[0]], converterId: convIds[i] })), artboardId);   // the formula drive has no shares
     }
     if (removeKeys) {
       warnCurves(rows);
@@ -777,10 +973,20 @@ export function createRig(mcp, log = () => {}, store) {
       manifest.keysRemoved = true;
     }
     await saveManifest(manifest);
+    // the owners add the shares from now on
+    for (const ownerRig of new Set(shares.map(x => x.owner))) {
+      try {
+        const owner = (await manifests()).find(m => m.rig === ownerRig);
+        owner.guests = [...(owner.guests || []).filter(g => g.rig !== rig), { rig, props: shares.filter(x => x.owner === ownerRig).map(x => x.n) }];
+        await rewriteOwner(owner);
+      } catch (e) {
+        warn(`Couldn't update "${ownerRig}" to add this rig's share (${String(e.message || e)}). Bind this rig again to retry.`);
+      }
+    }
     // poses are added one at a time, so say when the timeline holds more of them than were bound
     const lastKeyed = Math.max(0, ...[...tracks.values()].flatMap(t => t.keys.map(k => k.frame)));
     const past = lastKeyed > poses ? `The timeline has keys up to frame ${lastKeyed}, past pose ${poses}: add poses to bind those too.` : "";
-    return { ...manifest, note: [note, past].filter(Boolean).join(" ") };
+    return { ...manifest, note: [note, past].filter(Boolean).join(" "), shared: settled.shared, skipped: settled.skipped, restDiffers: settled.restDiffers };
   }
 
   // One joystick axis drags one input. The axis gets an empty timeline of its own, which turns the
@@ -839,6 +1045,7 @@ export function createRig(mcp, log = () => {}, store) {
     rig = E.safeName(rig);
     if (items.length < 2) throw new Error("Load at least two items.");
     const file = await fileKey();
+    if (drive === "script") { await claimable(file, rig); await refuseStaleNested(rig, artboardId); }
     const script = drive === "script" ? await luauScript(rig, artboardId) : null;
     await claim(file, null, rig, "toggler");
     const host = (await manifests()).find(m => m.kind === "joystick" && m.joystickId === joystickId);
@@ -848,11 +1055,13 @@ export function createRig(mcp, log = () => {}, store) {
 
     const pos = host ? { x: `${host.rig}_x`, y: `${host.rig}_y` }
       : { x: axes.includes("x") ? `${rig}_x` : null, y: axes.includes("y") ? `${rig}_y` : null };
+    await refuseBound(items.map(it => ({ objectId: it.id, propertyKey: 18 })), OTHER_RIG);
     const vmStart = await artboardViewModel(artboardId, artboardName);
     const { vm, ids, added } = await ensureNumbers(vmStart, host ? [] : [...axes].map(a => pos[a]));
     const shown = (await mcp("query_property_values", { propertyKeys: Object.fromEntries(items.map(it => [it.id, [18]])) })).values || {};
 
     const made = [];   // deleted again if a step fails, so no half-made rig stays
+    let nestedPv = null; // the nested view model, which a failed bind leaves for a reload
     const manifest = { kind: "toggler", drive, version: 1, file, rig, artboardId, joystickId, axes, pos, vmId: vm.id, addedProps: added, tracks: [], timelines: {},
       ...(host ? { source: host.rig } : {}),
       items: items.map(it => ({ id: it.id, name: it.name, x: it.x, y: it.y, opacity: shown[it.id]?.["18"] ?? 1 })) };
@@ -876,12 +1085,12 @@ export function createRig(mcp, log = () => {}, store) {
       }
       if (script) {
         const pv = await poseViewModel(vm, rig, items.map((_, i) => (i ? 0 : 1)), []);
-        made.push(pv.nestedPropId, pv.poses.id);
+        nestedPv = pv;
         const itemBinds = await bind(pv.poses.id, items.map((it, i) => ({ objectId: it.id, propertyKey: 18, viewModelPropertyId: pv.ids[`p${i}`], path: pv.path })), artboardId);
         made.unshift(...itemBinds);
         binds.push(...itemBinds);
         await setLanguage(script.name, script.language);
-        await writeScript(script.name, E.togglerScriptLuau(rig, items, pos));
+        await writeScript(script.name, E.togglerScriptLuau(rig, items, pos, true));
         note = await reloadHint(script.name, script.language);
         Object.assign(manifest, { poseVmId: pv.poses.id, nestedPropId: pv.nestedPropId, script: script.name, scriptLanguage: script.language, made: script.made });
       } else {
@@ -893,7 +1102,11 @@ export function createRig(mcp, log = () => {}, store) {
         binds.push(...itemBinds);
       }
     } catch (e) {
-      await mcp("delete_objects", { objectIds: made }).catch(() => {});
+      await deleteAll(made);
+      if (script) await dropMadeScript(script);
+      if (nestedPv) await leaveNested("toggler", rig, file, vm.id, artboardId, nestedPv);
+      e.message += leftNote(rig);
+      e.rolledBack = true;
       if (!host) await mcp("set_property_values", { propertyValues: { [joystickId]: Object.fromEntries([...axes].map(a => [AXIS[a].value, 0])) } }).catch(() => {});
       throw e;
     }
@@ -905,11 +1118,23 @@ export function createRig(mcp, log = () => {}, store) {
   // ------------------------------------------------------------ unbind
 
   async function unbind(m) {
+    if (m.cleanup) return finishCleanup(m);
     if (m.kind === "joystick") {
       const reader = (await manifests()).find(t => t.kind === "toggler" && t.source === m.rig);
       if (reader) throw new Error(`The toggler "${reader.rig}" reads this rig's joystick. Unbind it first, on the Toggler tab.`);
     }
+    const all = await manifests();
+    const guests = (m.guests || []).filter(g => all.some(x => x.rig === g.rig));
+    if (guests.length) throw new Error(`The NumInput rig "${guests[0].rig}" adds to properties this rig drives. Unbind it first.`);
     const timeline = m.keysRemoved ? await poseTimeline(m) : null;
+    // a contributor's owners stop reading its shares before its view model goes
+    for (const ownerRig of new Set((m.shares || []).map(x => x.owner))) {
+      const owner = all.find(x => x.rig === ownerRig);
+      if (!owner) continue;
+      owner.guests = (owner.guests || []).filter(g => g.rig !== m.rig);
+      try { await rewriteOwner(owner); } catch (e) { warn(`Couldn't update "${ownerRig}" (${String(e.message || e)}): bind it again to drop this rig's share.`); }
+    }
+    if (m.shares?.length) await new Promise(r => setTimeout(r, SETTLE_MS));
     const binds = m.binds || [];
     const vm0 = ((await mcp("viewmodel_editor", { command: "listViewModels" })).viewModels || []).find(v => v.id === m.vmId);
     const rigProps = new Set((vm0?.viewModelProperties || []).filter(p => (m.addedProps || []).includes(p.name)).map(p => p.id));
@@ -918,7 +1143,7 @@ export function createRig(mcp, log = () => {}, store) {
     for (const d of await allBinds())
       if (rigProps.has(d.viewModelPropertyId) || rigConv.has(d.converterId) || (m.poseVmId && d.viewModelId === m.poseVmId)) mine.add(pair(d));
     for (const k of mine) unbound.add(k);
-    for (const part of chunks(binds, 400)) await mcp("delete_objects", { objectIds: part });
+    await deleteAll(binds);   // after a crash some may be gone already
     if (m.keysRemoved) {
       const add = m.tracks.flatMap(t => t.keys.map(k => ({ objectId: t.objectId, propertyKey: t.propertyKey, ...k, interpolationType: k.interpolationType || "linear" })));
       for (const part of chunks(add, 400)) {
@@ -928,7 +1153,6 @@ export function createRig(mcp, log = () => {}, store) {
     // converters go too; the editor's converter list can keep a stale entry until reload
     const extra = [...(m.converters || []), ...(m.switches || []).map(s => s.converter)];
     if (m.drive === "script") {
-      extra.push(m.nestedPropId, m.poseVmId);
       // the placement goes too when Poser made it; the user's script stays, emptied, so it stops
       // looking for the removed view model (rigs from before kept a script Poser made: it goes)
       if (m.made?.placement) extra.push(m.made.placement);
@@ -961,12 +1185,33 @@ export function createRig(mcp, log = () => {}, store) {
     // the view model numbers this rig added (deleting a property removes its instance values)
     const vm = ((await mcp("viewmodel_editor", { command: "listViewModels" })).viewModels || []).find(v => v.id === m.vmId);
     const propIds = (vm?.viewModelProperties || []).filter(p => (m.addedProps || []).includes(p.name)).map(p => p.id);
-    if (propIds.length) await mcp("delete_objects", { objectIds: propIds });
-    await dropManifest(m);
+    if (propIds.length > 100) log(`Removing ${propIds.length} numbers from "${vm.name}"… a big rig can take a minute.`);
+    if (propIds.length) await deleteAll(propIds);
+    // A nested view model goes in a second Unbind, after a reload: deleting view-model data while
+    // the editor still has stale copies from earlier deletes has crashed Rive 0.9.517. So everything
+    // else is done and saved first, and a crash there costs nothing else.
+    const legacy = !!(m.nestedPropId && !m.flat);
+    if (legacy) await saveManifest({ kind: m.kind, rig: m.rig, file: m.file, version: 1, vmId: m.vmId, artboardId: m.artboardId, drive: m.drive,
+      tracks: [], items: [], cleanup: { nestedPropId: m.nestedPropId, poseVmId: m.poseVmId } });
+    else await dropManifest(m);
     // binds the editor still lists would be retargeted, not replaced, by the next bind there
     const left = (await allBinds()).filter(d => mine.has(pair(d))).length;
     return { binds: binds.length, restored: m.keysRemoved ? m.tracks.length : 0, leftovers, left, recreated: timeline?.recreated,
-      keptTimelines: axisTimelines.filter(t => keyed.has(t.id)).map(t => t.name) };
+      keptTimelines: axisTimelines.filter(t => keyed.has(t.id)).map(t => t.name), cleanupPending: legacy };
+  }
+
+  // The second Unbind of a nested rig, after a reload: its nested view model alone. The selection is
+  // cleared first, in case the inspector shows something bound through it, then the property and the
+  // view model go in one delete.
+  async function finishCleanup(m) {
+    await mcp("select_objects", { objectIds: [] }).catch(() => {});
+    await new Promise(r => setTimeout(r, 1000));
+    const ids = [m.cleanup.nestedPropId, m.cleanup.poseVmId].filter(Boolean);
+    const there = new Set(((await mcp("query_objects", { objectIds: ids, depth: 0 })).objects || []).map(o => o.id));
+    const gone = ids.filter(id => there.has(id));
+    if (gone.length) await mcp("delete_objects", { objectIds: gone });
+    await dropManifest(m);
+    return { binds: 0, restored: 0, leftovers: 0, left: 0, keptTimelines: [], cleaned: true };
   }
 
   // ------------------------------------------------------------ tools
